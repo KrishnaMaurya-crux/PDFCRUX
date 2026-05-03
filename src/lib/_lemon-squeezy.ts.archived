@@ -1,0 +1,89 @@
+/**
+ * Lemon Squeezy Integration — Payment Gateway for Global
+ *
+ * Creates Lemon Squeezy checkout sessions for Premium plans.
+ * Requires: LEMONSQUEEZY_API_KEY, LEMONSQUEEZY_STORE_ID
+ *
+ * Pricing (USD):
+ * - Premium Monthly: $5.99
+ * - Premium Annual: $49
+ */
+
+import { env } from "@/lib/env";
+
+export interface LemonSqueezyCheckout {
+  url: string;
+  checkoutId: string;
+}
+
+const PRICING_USD = {
+  premiumMonthly: 599, // $5.99 in cents
+  premiumAnnual: 4900, // $49 in cents
+};
+
+/**
+ * Create a Lemon Squeezy checkout session on the server
+ */
+export async function createLemonSqueezyCheckout(
+  planType: "monthly" | "annual",
+  userEmail: string,
+  userName: string
+): Promise<LemonSqueezyCheckout> {
+  if (!env.lemonSqueezy.isConfigured) {
+    throw new Error(
+      "Lemon Squeezy is not configured. Set LEMONSQUEEZY_API_KEY and STORE_ID."
+    );
+  }
+
+  const variantId = planType === "monthly" ? "monthly_variant" : "annual_variant";
+
+  // In production, this calls Lemon Squeezy API:
+  // POST https://api.lemonsqueezy.com/v1/checkouts
+  const checkoutData = {
+    store_id: env.lemonSqueezy.storeId,
+    variant_id: variantId, // From Lemon Squeezy product settings
+    custom_data: {
+      user_email: userEmail,
+      user_name: userName,
+    },
+    checkout_data: {
+      email: userEmail,
+      name: userName,
+    },
+  };
+
+  console.log("[Lemon Squeezy] Creating checkout:", {
+    ...checkoutData,
+    amount: planType === "monthly" ? "$5.99" : "$49",
+  });
+
+  // Stub: When keys are set, this creates a real checkout
+  return {
+    url: "#checkout-stub",
+    checkoutId: `checkout_${Date.now()}`,
+  };
+}
+
+/**
+ * Verify Lemon Squeezy webhook signature
+ */
+export function verifyLemonSqueezyWebhook(
+  payload: string,
+  signature: string
+): boolean {
+  if (!env.lemonSqueezy.isConfigured || !env.lemonSqueezy.webhookSecret) {
+    return false;
+  }
+
+  // In production, use HMAC-SHA256:
+  // crypto.createHmac("sha256", webhookSecret).update(payload).digest("hex")
+  console.log("[Lemon Squeezy] Verifying webhook signature");
+  return true; // Stub: always true for now
+}
+
+export const isLemonSqueezyReady = env.lemonSqueezy.isConfigured;
+export const PRICING_USD_DISPLAY = {
+  monthly: "$5.99",
+  annual: "$49",
+  annualMonthly: "$4.08",
+};
