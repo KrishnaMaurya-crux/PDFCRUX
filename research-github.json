@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://github.com/topics/invoice-pdf?l=javascript",
+    "name": "invoice-pdf · GitHub Topics",
+    "snippet": "A modern, Electron-based invoicing application that helps freelancers and small businesses create professional invoices, manage multiple business profiles, and ... Missing: lib | Show results with: lib",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/topics/invoice-generator?l=javascript&o=asc&s=stars",
+    "name": "invoice-generator · GitHub Topics",
+    "snippet": "A simple yet powerful invoice generator that creates professional PDF invoices through a RESTful API with an easy-to-use web interface. invoice invoice-pdf ...",
+    "host_name": "github.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/topics/invoice-generator",
+    "name": "invoice-generator · GitHub Topics",
+    "snippet": "Invoicr is a free and open-source PHP invoice generator that is capable of churning out HTML, PDF, DOCX, and PNG invoices. Missing: professional | Show results with: professional",
+    "host_name": "github.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/topics/invoice-pdf",
+    "name": "invoice-pdf · GitHub Topics",
+    "snippet": "A self-hosted open-source application built with CodeIgniter and Bootstrap. Features include electronic invoicing, PDF generation, invoice status tracking. Missing: professional | Show results with: professional",
+    "host_name": "github.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/topics/invoice-generator?l=typescript&o=desc&s=stars",
+    "name": "invoice-generator · GitHub Topics",
+    "snippet": "Free Invoice Generator. Create, preview and download professional PDF invoices in seconds. Free, no account needed, works in your browser. pdf-invoice invoice- ...",
+    "host_name": "github.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/topics/invoice-generator?l=typescript&o=asc&s=forks",
+    "name": "invoice-generator · GitHub Topics",
+    "snippet": "A fast, responsive, and privacy-focused web application to create professional PDF invoices directly in your browser. Built with Angular & Bootstrap. bootstrap ...",
+    "host_name": "github.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/topics/pdf-invoice-generation",
+    "name": "pdf-invoice-generation · GitHub Topics",
+    "snippet": "A self-hosted open-source application built with CodeIgniter and Bootstrap. Features include electronic invoicing, PDF generation, invoice status tracking. Missing: professional 2024",
+    "host_name": "github.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/edisonneza/jspdf-invoice-template",
+    "name": "edisonneza/jspdf-invoice-template: PDF template created  - GitHub",
+    "snippet": "PDF template created to generate invoices based on props object. Using jsPDF library. ( jsPDF is exported also, so it can be used without importing jsPDF ... Missing: 2024 | Show results with: 2024",
+    "host_name": "github.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  }
+]
