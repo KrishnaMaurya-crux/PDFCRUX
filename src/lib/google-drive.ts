@@ -14,6 +14,26 @@
 
 import { env } from "@/lib/env";
 
+// ============================================================
+// Google Drive OAuth Scopes
+// These 5 scopes grant comprehensive read/install access:
+//   1. drive.file        — Per-file access (created/opened by this app)
+//   2. drive.readonly    — Read all files in user's Drive
+//   3. drive.metadata.readonly — Read file metadata only
+//   4. drive.appdata     — Access app's hidden data folder
+//   5. drive.install     — Verify Drive app is installed
+// ============================================================
+export const GOOGLE_DRIVE_SCOPES = [
+  "https://www.googleapis.com/auth/drive.file",
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.metadata.readonly",
+  "https://www.googleapis.com/auth/drive.appdata",
+  "https://www.googleapis.com/auth/drive.install",
+];
+
+// Discovery doc URI for Google Identity Services (GIS)
+const DISCOVERY_DOC = "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest";
+
 export interface GoogleDriveFile {
   id: string;
   name: string;
@@ -30,7 +50,8 @@ export interface ImportedFile {
 }
 
 /**
- * Load Google Picker API script dynamically
+ * Load Google Identity Services (GIS) and Picker API scripts dynamically.
+ * GIS provides the modern OAuth token flow required by the Picker.
  */
 export function loadGooglePickerAPI(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -45,11 +66,12 @@ export function loadGooglePickerAPI(): Promise<void> {
       return reject(new Error("Google Drive is not configured. Missing API keys."));
     }
 
+    // Load the gapi client script first
     const script = document.createElement("script");
     script.src = "https://apis.google.com/js/api.js";
     script.onload = () => {
       // Load picker and client libraries
-      (window as Record<string, unknown>).gapi?.load("picker", {
+      (window as Record<string, unknown>).gapi?.load("client:picker", {
         callback: () => resolve(),
         onerror: () => reject(new Error("Failed to load Google Picker")),
       });
@@ -60,8 +82,9 @@ export function loadGooglePickerAPI(): Promise<void> {
 }
 
 /**
- * Open Google Picker for PDF file selection
- * Returns selected files with download tokens
+ * Open Google Picker for PDF file selection.
+ * Uses TokenClient (GIS) to obtain an OAuth token with all 5 Drive scopes.
+ * Returns selected files with download tokens.
  */
 export async function openGoogleDrivePicker(): Promise<GoogleDriveFile[]> {
   await loadGooglePickerAPI();
@@ -71,45 +94,80 @@ export async function openGoogleDrivePicker(): Promise<GoogleDriveFile[]> {
       return reject(new Error("Google Drive not configured"));
     }
 
-    const picker = new (
-      window as Record<string, Record<string, new (...args: unknown[]) => unknown>>
-    ).google.picker.PickerBuilder()
-      .setAppId(env.googleDrive.appId)
-      .setOAuthToken("") // Will use user's existing Google session
-      .setDeveloperKey(env.googleDrive.apiKey)
-      .setCallback((data: Record<string, unknown>) => {
-        const action = data.action as string;
-        if (action === "google.picker.action.PICKED") {
-          const docs = (data.docs as GoogleDriveFile[]) || [];
-          if (docs.length > 0) {
-            resolve(docs);
-          } else {
-            reject(new Error("No files selected"));
-          }
-        } else if (action === "google.picker.action.CANCEL") {
-          reject(new Error("Picker cancelled"));
-        }
-      })
-      .setTitle("Select PDF files from Google Drive")
-      .setMimeTypes("application/pdf")
-      .enableFeature(
-        (window as Record<string, Record<string, string>>).google?.picker?.Feature
-          ?.MULTISELECT_ENABLED || ""
-      )
-      .build();
+    // Obtain an OAuth access token via Google Identity Services (TokenClient)
+    // This ensures all 5 Drive scopes are granted before the Picker opens.
+    const tokenClient = (
+      window as Record<string, Record<string, new (opts: Record<string, unknown>) => {
+        callback: (resp: Record<string, unknown>) => void;
+        requestAccessToken: (opts?: Record<string, unknown>) => void;
+      }>>
+    ).google?.accounts?.oauth2;
 
-    picker.setVisible(true);
+    if (!tokenClient) {
+      return reject(new Error("Google Identity Services not available. Please reload the page."));
+    }
+
+    const client = new tokenClient.TokenClient({
+      client_id: env.googleDrive.clientId,
+      scope: GOOGLE_DRIVE_SCOPES.join(" "),
+      callback: (tokenResponse: Record<string, unknown>) => {
+        const accessToken = tokenResponse.access_token as string | undefined;
+        if (!accessToken) {
+          // If there's an error or no token, Picker can still work via developer key
+          // for files that the user shares directly.
+          buildPicker("");
+          return;
+        }
+        buildPicker(accessToken);
+      },
+    });
+
+    client.requestAccessToken({ prompt: "" });
+
+    function buildPicker(oauthToken: string) {
+      const picker = new (
+        window as Record<string, Record<string, new (...args: unknown[]) => unknown>>
+      ).google.picker.PickerBuilder()
+        .setAppId(env.googleDrive.appId)
+        .setOAuthToken(oauthToken)
+        .setDeveloperKey(env.googleDrive.apiKey)
+        .setCallback((data: Record<string, unknown>) => {
+          const action = data.action as string;
+          if (action === "google.picker.action.PICKED") {
+            const docs = (data.docs as GoogleDriveFile[]) || [];
+            if (docs.length > 0) {
+              resolve(docs);
+            } else {
+              reject(new Error("No files selected"));
+            }
+          } else if (action === "google.picker.action.CANCEL") {
+            reject(new Error("Picker cancelled"));
+          }
+        })
+        .setTitle("Select PDF files from Google Drive")
+        .setMimeTypes("application/pdf")
+        .enableFeature(
+          (window as Record<string, Record<string, string>>).google?.picker?.Feature
+            ?.MULTISELECT_ENABLED || ""
+        )
+        .build();
+
+      picker.setVisible(true);
+    }
   });
 }
 
 /**
- * Download a file from Google Drive using access token (server-side)
+ * Download a file from Google Drive using access token.
+ * Works both client-side and server-side.
+ * Prefers `fields=name,size,mimeType` on the download URL to avoid a second request.
  */
 export async function downloadGoogleDriveFile(
   fileId: string,
   accessToken: string
 ): Promise<ImportedFile> {
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  // Use alt=media with fields to get both metadata + content in one call
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&fields=name,size,mimeType`;
 
   const response = await fetch(url, {
     headers: {
@@ -121,20 +179,19 @@ export async function downloadGoogleDriveFile(
     throw new Error(`Failed to download: ${response.statusText}`);
   }
 
-  // Get file metadata
-  const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,size,mimeType`;
-  const metaResponse = await fetch(metaUrl, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const metadata = await metaResponse.json();
+  // Google returns metadata in JSON content-type for fields param;
+  // fallback: try to extract name from Content-Disposition header.
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const nameMatch = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";\n]+)"?/i);
+  const fallbackName = nameMatch ? decodeURIComponent(nameMatch[1]) : `drive_${fileId}.pdf`;
 
   const data = await response.arrayBuffer();
 
   return {
-    name: metadata.name || `drive_${fileId}.pdf`,
+    name: fallbackName,
     data,
-    mimeType: metadata.mimeType || "application/pdf",
-    size: metadata.size || data.byteLength,
+    mimeType: "application/pdf",
+    size: data.byteLength,
   };
 }
 

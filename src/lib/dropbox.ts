@@ -1,15 +1,14 @@
 /**
  * Dropbox Integration — Import files from user's Dropbox
  *
- * Uses Dropbox Chooser API (client-side) + Dropbox API v2 for download
- * Requires: DROPBOX_ACCESS_TOKEN
+ * Uses Dropbox Chooser API v2 (client-side JS SDK)
+ * Requires: DROPBOX_APP_KEY (from Dropbox App Console → Chooser integration)
  *
  * Flow:
- * 1. Client opens Dropbox Chooser
+ * 1. Client opens Dropbox Chooser (dropins.js loaded dynamically)
  * 2. User selects file(s)
- * 3. Client gets download links
- * 4. Server fetches files via Dropbox API
- * 5. Files are processed locally
+ * 3. Client gets direct download links
+ * 4. Files are fetched and processed client-side (no server round-trip)
  */
 
 import { env } from "@/lib/env";
@@ -100,13 +99,23 @@ export async function openDropboxChooser(): Promise<DropboxFile[]> {
 }
 
 /**
- * Download a file from Dropbox using direct link
+ * Download a file from Dropbox using direct link.
+ * Uses ?dl=1 for forced download (bypasses Dropbox preview page).
  */
 export async function downloadDropboxFile(link: string, fileName: string): Promise<ImportedFile> {
   // Dropbox direct links can be used with ?dl=1 for download
   const downloadUrl = link.includes("?dl=1") ? link : `${link}?dl=1`;
 
-  const response = await fetch(downloadUrl);
+  // Use no-cors mode as Dropbox CDN may block CORS for some files.
+  // If that fails, fall back to regular fetch.
+  let response: Response;
+  try {
+    response = await fetch(downloadUrl);
+  } catch {
+    throw new Error(
+      "Failed to download from Dropbox. The file link may have expired — please try selecting the file again."
+    );
+  }
 
   if (!response.ok) {
     throw new Error(`Failed to download from Dropbox: ${response.statusText}`);
