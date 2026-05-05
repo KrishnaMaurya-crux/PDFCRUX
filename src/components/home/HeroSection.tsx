@@ -72,7 +72,7 @@ function FloatingIcon({ icon: Icon, color, size, top, left, delay, duration }: t
 }
 
 export default function HeroSection() {
-  const { selectTool } = useAppStore();
+  const { selectTool, openAuthDialog } = useAppStore();
   const { t } = useLanguage();
 
   return (
@@ -159,10 +159,7 @@ export default function HeroSection() {
             <Button
               size="lg"
               className="h-12 px-8 text-base gap-2 shadow-xl shadow-primary/20 hover:shadow-primary/30 transition-shadow"
-              onClick={() => {
-                const el = document.getElementById("tools-grid");
-                if (el) el.scrollIntoView({ behavior: "smooth" });
-              }}
+              onClick={openAuthDialog}
             >
               {t("hero.cta")}
               <ArrowRight className="w-4 h-4" />
