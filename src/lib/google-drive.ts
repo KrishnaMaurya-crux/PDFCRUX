@@ -16,19 +16,19 @@ import { env } from "@/lib/env";
 
 // ============================================================
 // Google Drive OAuth Scopes
-// These 5 scopes grant comprehensive read/install access:
-//   1. drive.file        — Per-file access (created/opened by this app)
-//   2. drive.readonly    — Read all files in user's Drive
-//   3. drive.metadata.readonly — Read file metadata only
-//   4. drive.appdata     — Access app's hidden data folder
-//   5. drive.install     — Verify Drive app is installed
+// These 5 scopes are required for full Google Drive integration:
+//   1. userinfo.email     — Read user's email address
+//   2. userinfo.profile   — Read user's basic profile info
+//   3. openid             — OpenID Connect authentication
+//   4. drive.file         — Per-file access (created/opened by this app)
+//   5. drive.appdata      — Access app's hidden data folder
 // ============================================================
 export const GOOGLE_DRIVE_SCOPES = [
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/userinfo.profile",
+  "openid",
   "https://www.googleapis.com/auth/drive.file",
-  "https://www.googleapis.com/auth/drive.readonly",
-  "https://www.googleapis.com/auth/drive.metadata.readonly",
   "https://www.googleapis.com/auth/drive.appdata",
-  "https://www.googleapis.com/auth/drive.install",
 ];
 
 // Discovery doc URI for Google Identity Services (GIS)

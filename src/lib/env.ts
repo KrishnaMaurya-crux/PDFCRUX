@@ -120,7 +120,7 @@ export function getEnvHealth(): HealthStatus[] {
       name: "Google Drive Import",
       configured: googleDrive.isConfigured,
       details: googleDrive.isConfigured
-        ? "Client ID + API Key ready"
+        ? "Client ID + API Key ready (5 scopes: file, readonly, metadata, appdata, install)"
         : "Missing GOOGLE_DRIVE_CLIENT_ID or API_KEY",
     },
     {
