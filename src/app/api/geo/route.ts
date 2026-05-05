@@ -38,32 +38,4 @@ export async function GET(request: NextRequest) {
       signal: AbortSignal.timeout(3000), // 3s timeout
     });
 
-    if (!geoRes.ok) {
-      // Fallback to global
-      return NextResponse.json({
-        country: "US",
-        isIndia: false,
-        region: "global",
-        ip: clientIp,
-      });
-    }
-
-    const geoData = await geoRes.json();
-    const country = (geoData.country_code || "US").toUpperCase();
-    const isIndia = country === "IN";
-
-    return NextResponse.json({
-      country,
-      isIndia,
-      region: isIndia ? "india" : "global",
-      ip: clientIp,
-    });
-  } catch {
-    // Any error → default to global (USD)
-    return NextResponse.json({
-      country: "US",
-      isIndia: false,
-      region: "global",
-    });
-  }
-}
+    
