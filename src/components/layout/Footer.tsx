@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   FileText,
   Shield,
@@ -36,7 +37,7 @@ import {
 type ModalType = "about" | null;
 
 export default function Footer() {
-  const { selectTool, navigatePricing, navigatePrivacy, navigateTerms, navigateRefund, navigateContact } = useAppStore();
+  const { selectTool, navigatePricing } = useAppStore();
   const [openModal, setOpenModal] = useState<ModalType>(null);
   const { t, language, setLanguage } = useLanguage();
 
@@ -51,13 +52,13 @@ export default function Footer() {
     "rotate-pdf",
   ];
 
-  const companyLinks: { label: string; action: string }[] = [
-    { label: "About Us", action: "about" },
-    { label: "Pricing", action: "pricing" },
-    { label: "Privacy Policy", action: "privacy" },
-    { label: "Terms of Service", action: "terms" },
-    { label: "Refund Policy", action: "refund" },
-    { label: "Contact Us", action: "contact" },
+  const companyLinks = [
+    { label: "About Us", href: null as string | null, action: "about" as const },
+    { label: "Pricing", href: null as string | null, action: "pricing" as const },
+    { label: "Privacy Policy", href: "/privacy", action: null as string | null },
+    { label: "Terms of Service", href: "/terms", action: null as string | null },
+    { label: "Refund Policy", href: "/refund", action: null as string | null },
+    { label: "Contact Us", href: "/contact", action: null as string | null },
   ];
 
   return (
@@ -141,21 +142,26 @@ export default function Footer() {
             <ul className="space-y-2">
               {companyLinks.map((link) => (
                 <li key={link.label}>
-                  <button
-                    onClick={() => {
-                      switch (link.action) {
-                        case "about": setOpenModal("about"); break;
-                        case "pricing": navigatePricing(); break;
-                        case "privacy": navigatePrivacy(); break;
-                        case "terms": navigateTerms(); break;
-                        case "refund": navigateRefund(); break;
-                        case "contact": navigateContact(); break;
-                      }
-                    }}
-                    className="text-sm text-muted-foreground hover:text-primary transition-colors"
-                  >
-                    {link.label}
-                  </button>
+                  {link.href ? (
+                    <Link
+                      href={link.href}
+                      className="text-sm text-muted-foreground hover:text-primary transition-colors"
+                    >
+                      {link.label}
+                    </Link>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        switch (link.action) {
+                          case "about": setOpenModal("about"); break;
+                          case "pricing": navigatePricing(); break;
+                        }
+                      }}
+                      className="text-sm text-muted-foreground hover:text-primary transition-colors"
+                    >
+                      {link.label}
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
