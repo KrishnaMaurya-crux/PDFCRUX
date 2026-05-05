@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload,
@@ -24,11 +24,21 @@ import {
   FileSpreadsheet,
   FileUp,
   Package,
+  TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { useAppStore } from "@/lib/store";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { getToolById, getCategoryForTool } from "@/lib/tools";
 import { getToolConfig } from "@/lib/tool-configs";
 import ToolOptions from "./ToolOptions";
@@ -283,6 +293,8 @@ export default function ToolPage() {
     setProcessingProgress,
     completeProcessing,
     resetTool,
+    selectTool,
+    openAuthDialog,
   } = useAppStore();
 
   const { toast } = useToast();
@@ -316,6 +328,10 @@ export default function ToolPage() {
     null
   );
 
+  // Task A: Large file dialog state
+  const [showLargeFileDialog, setShowLargeFileDialog] = useState(false);
+  const [largeFileName, setLargeFileName] = useState("");
+
   // For dual upload (compare)
   const [compareFileA, setCompareFileA] = useState<File | null>(null);
   const [compareFileB, setCompareFileB] = useState<File | null>(null);
@@ -324,9 +340,33 @@ export default function ToolPage() {
     false,
   ]);
 
+  // Task B: Auth gate — check if user is signed in before processing/downloading
+  const requireAuth = useCallback(async (): Promise<boolean> => {
+    // If Supabase is not configured, allow all actions (graceful degradation)
+    if (!isSupabaseConfigured) return true;
+
+    try {
+      const {
+        data: { session: currentSession },
+      } = await supabase.auth.getSession();
+      if (currentSession) return true;
+
+      // No session — show auth dialog
+      openAuthDialog();
+      return false;
+    } catch {
+      // If session check fails, allow processing (graceful degradation)
+      return true;
+    }
+  }, [openAuthDialog]);
+
   // REAL processing with actual PDF manipulation
   const handleProcess = async () => {
     if (!config || !selectedToolId) return;
+
+    // Task B: Auth gate before processing
+    const isAuthed = await requireAuth();
+    if (!isAuthed) return;
 
     // Validation
     for (const opt of config.options) {
@@ -460,6 +500,8 @@ export default function ToolPage() {
 
   const handleFileSelection = (files: File[]) => {
     setError(null);
+    // Determine the files that will actually be added
+    let filesToAdd: File[];
     if (tool.acceptTypes) {
       const accepted = tool.acceptTypes.split(",");
       const valid = files.filter((f) => {
@@ -476,9 +518,19 @@ export default function ToolPage() {
         setError("This tool accepts only one file at a time.");
         return;
       }
-      addFiles(valid);
+      filesToAdd = valid;
     } else {
-      addFiles(files);
+      filesToAdd = files;
+    }
+
+    addFiles(filesToAdd);
+
+    // Task A: Check for large files (>50MB) and suggest compressing first
+    const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024; // 50MB
+    const largeFile = filesToAdd.find((f) => f.size > LARGE_FILE_THRESHOLD);
+    if (largeFile && selectedToolId !== "compress-pdf") {
+      setLargeFileName(largeFile.name);
+      setShowLargeFileDialog(true);
     }
   };
 
@@ -489,15 +541,29 @@ export default function ToolPage() {
 
   const handleCompareFileA = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setCompareFileA(e.target.files[0]);
+      const file = e.target.files[0];
+      setCompareFileA(file);
       setError(null);
+      // Task A: Large file check for compare uploads
+      const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
+      if (file.size > LARGE_FILE_THRESHOLD && selectedToolId !== "compress-pdf") {
+        setLargeFileName(file.name);
+        setShowLargeFileDialog(true);
+      }
     }
   };
 
   const handleCompareFileB = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setCompareFileB(e.target.files[0]);
+      const file = e.target.files[0];
+      setCompareFileB(file);
       setError(null);
+      // Task A: Large file check for compare uploads
+      const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
+      if (file.size > LARGE_FILE_THRESHOLD && selectedToolId !== "compress-pdf") {
+        setLargeFileName(file.name);
+        setShowLargeFileDialog(true);
+      }
     }
   };
 
@@ -573,7 +639,7 @@ export default function ToolPage() {
   };
 
   // Handle real file download
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const result = processResult;
     if (!result || !result.success || result.outputFiles.length === 0) {
       toast({
@@ -583,6 +649,10 @@ export default function ToolPage() {
       });
       return;
     }
+
+    // Task B: Auth gate before download
+    const isAuthed = await requireAuth();
+    if (!isAuthed) return;
 
     if (result.outputFiles.length === 1) {
       // Single file - download directly
@@ -867,6 +937,14 @@ export default function ToolPage() {
                   optionValues={optionValues}
                   compareFileA={compareFileA}
                   compareFileB={compareFileB}
+                  onPageOrderChange={(order) => {
+                    // Store the reordered page numbers as a comma-separated string
+                    // so the PDF processor can apply the new order
+                    setOptionValues((prev) => ({
+                      ...prev,
+                      "page-order": order.join(","),
+                    }));
+                  }}
                 />
               )}
 
@@ -1133,6 +1211,46 @@ export default function ToolPage() {
           )}
         </AnimatePresence>
       </div>
+
+      {/* Task A: Large File Compress Suggestion Dialog */}
+      <Dialog open={showLargeFileDialog} onOpenChange={setShowLargeFileDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <TriangleAlert className="w-5 h-5 text-amber-500" />
+              Large File Detected
+            </DialogTitle>
+            <DialogDescription>
+              <span className="font-medium">{largeFileName}</span> is over 50MB.
+              Processing may be slow and could affect performance.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+            <p className="text-sm text-amber-800 dark:text-amber-200">
+              We recommend compressing large PDFs first to improve processing
+              speed and reliability.
+            </p>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setShowLargeFileDialog(false)}
+            >
+              Continue Anyway
+            </Button>
+            <Button
+              onClick={() => {
+                setShowLargeFileDialog(false);
+                selectTool("compress-pdf");
+              }}
+              className="gap-2"
+            >
+              <FileText className="w-4 h-4" />
+              Compress First
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
