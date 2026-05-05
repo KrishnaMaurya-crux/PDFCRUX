@@ -25,6 +25,8 @@ import {
   FileUp,
   Package,
   TriangleAlert,
+  FolderOpen,
+  Archive,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -50,6 +52,18 @@ import {
   downloadMultipleAsZip,
   type ProcessResult,
 } from "@/lib/pdf-processor";
+import {
+  openGoogleDrivePicker,
+  downloadGoogleDriveFile,
+  uploadToGoogleDrive,
+  isGoogleDriveReady,
+} from "@/lib/google-drive";
+import {
+  openDropboxChooser,
+  downloadDropboxFile,
+  saveToDropbox,
+  isDropboxReady,
+} from "@/lib/dropbox";
 
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -142,6 +156,8 @@ function DualUploadArea({
   fileInputBRef,
   onFileAInput,
   onFileBInput,
+  onDropFileA,
+  onDropFileB,
   onRemoveA,
   onRemoveB,
   acceptTypes,
@@ -155,6 +171,8 @@ function DualUploadArea({
   fileInputBRef: React.RefObject<HTMLInputElement | null>;
   onFileAInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onFileBInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onDropFileA?: (file: File) => void;
+  onDropFileB?: (file: File) => void;
   onRemoveA: () => void;
   onRemoveB: () => void;
   acceptTypes?: string;
@@ -164,24 +182,46 @@ function DualUploadArea({
   const handleDropA = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver([false, isDragOver[1]]);
-    if (e.dataTransfer.files[0]) {
-      const dt = new DataTransfer();
-      dt.items.add(e.dataTransfer.files[0]);
-      if (fileInputARef.current) {
-        fileInputARef.current.files = dt.files;
-        fileInputARef.current.dispatchEvent(new Event("change", { bubbles: true }));
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile) {
+      const check = validateFile(droppedFile);
+      if (check.valid) {
+        // Directly invoke the parent's callback — avoids synthetic event issues on mobile
+        if (onDropFileA) {
+          onDropFileA(droppedFile);
+        } else {
+          // Fallback: use input ref (original behavior)
+          const dt = new DataTransfer();
+          dt.items.add(droppedFile);
+          if (fileInputARef.current) {
+            fileInputARef.current.files = dt.files;
+            fileInputARef.current.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+      } else {
+        console.warn(`Dropped file for slot A skipped: ${check.reason}`);
       }
     }
   };
   const handleDropB = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver([isDragOver[0], false]);
-    if (e.dataTransfer.files[0]) {
-      const dt = new DataTransfer();
-      dt.items.add(e.dataTransfer.files[0]);
-      if (fileInputBRef.current) {
-        fileInputBRef.current.files = dt.files;
-        fileInputBRef.current.dispatchEvent(new Event("change", { bubbles: true }));
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile) {
+      const check = validateFile(droppedFile);
+      if (check.valid) {
+        if (onDropFileB) {
+          onDropFileB(droppedFile);
+        } else {
+          const dt = new DataTransfer();
+          dt.items.add(droppedFile);
+          if (fileInputBRef.current) {
+            fileInputBRef.current.files = dt.files;
+            fileInputBRef.current.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+      } else {
+        console.warn(`Dropped file for slot B skipped: ${check.reason}`);
       }
     }
   };
@@ -277,6 +317,22 @@ function DualUploadArea({
   );
 }
 
+/**
+ * Defensive validation for File objects before they enter upload state.
+ * Catches empty (0-byte), unnamed, or non-File entries that some mobile
+ * browsers can produce when the picker is cancelled or returns a stale ref.
+ */
+function validateFile(file: File): { valid: boolean; reason?: string } {
+  if (!file || !(file instanceof File))
+    return { valid: false, reason: "Invalid file object" };
+  if (!file.name || file.name.trim() === "")
+    return { valid: false, reason: "File has no name" };
+  if (typeof file.size !== "number" || isNaN(file.size))
+    return { valid: false, reason: "File size is invalid" };
+  if (file.size === 0) return { valid: false, reason: "File is empty (0 bytes)" };
+  return { valid: true };
+}
+
 // Main ToolPage component
 export default function ToolPage() {
   const {
@@ -331,6 +387,9 @@ export default function ToolPage() {
   // Task A: Large file dialog state
   const [showLargeFileDialog, setShowLargeFileDialog] = useState(false);
   const [largeFileName, setLargeFileName] = useState("");
+
+  // Cloud import/save loading state
+  const [cloudLoading, setCloudLoading] = useState(false);
 
   // For dual upload (compare)
   const [compareFileA, setCompareFileA] = useState<File | null>(null);
@@ -495,7 +554,21 @@ export default function ToolPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    handleFileSelection(Array.from(e.dataTransfer.files));
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    const validDropped = droppedFiles.filter((f) => {
+      const check = validateFile(f);
+      if (!check.valid) {
+        console.warn(`Dropped file "${f.name}" skipped: ${check.reason}`);
+      }
+      return check.valid;
+    });
+    if (validDropped.length === 0 && droppedFiles.length > 0) {
+      setError(
+        "The dropped file(s) are empty or invalid. Please try again."
+      );
+      return;
+    }
+    handleFileSelection(validDropped);
   };
 
   const handleFileSelection = (files: File[]) => {
@@ -518,9 +591,38 @@ export default function ToolPage() {
         setError("This tool accepts only one file at a time.");
         return;
       }
-      filesToAdd = valid;
+      // After type check, also validate file size — reject 0-byte / invalid files
+      const validAndSized = valid.filter((f) => {
+        const check = validateFile(f);
+        if (!check.valid) {
+          console.warn(
+            `File "${f.name}" passed type check but failed validation: ${check.reason}`
+          );
+        }
+        return check.valid;
+      });
+      if (validAndSized.length === 0) {
+        setError(
+          "The selected file is empty (0 bytes). Please choose a valid file."
+        );
+        return;
+      }
+      filesToAdd = validAndSized;
     } else {
-      filesToAdd = files;
+      // No acceptTypes restriction — still filter out 0-byte / invalid files
+      filesToAdd = files.filter((f) => {
+        const check = validateFile(f);
+        if (!check.valid) {
+          console.warn(`File "${f.name}" skipped: ${check.reason}`);
+        }
+        return check.valid;
+      });
+      if (filesToAdd.length === 0 && files.length > 0) {
+        setError(
+          "The selected file is empty (0 bytes). Please choose a valid file."
+        );
+        return;
+      }
     }
 
     addFiles(filesToAdd);
@@ -535,13 +637,47 @@ export default function ToolPage() {
   };
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) handleFileSelection(Array.from(e.target.files));
+    if (e.target.files) {
+      const rawFiles = Array.from(e.target.files);
+      const validFiles = rawFiles.filter((f) => {
+        const check = validateFile(f);
+        if (!check.valid) {
+          console.warn(
+            `Input file "${f.name}" skipped: ${check.reason}`
+          );
+        }
+        return check.valid;
+      });
+      const skippedCount = rawFiles.length - validFiles.length;
+      if (skippedCount > 0) {
+        toast({
+          title: "Some files were skipped",
+          description: `${skippedCount} file(s) were empty or invalid and could not be uploaded.`,
+          variant: "destructive",
+        });
+      }
+      if (validFiles.length > 0) {
+        handleFileSelection(validFiles);
+      } else if (skippedCount > 0) {
+        setError(
+          "The selected file is empty (0 bytes). Please choose a valid file."
+        );
+      }
+    }
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleCompareFileA = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      const check = validateFile(file);
+      if (!check.valid) {
+        console.warn(`Compare File A skipped: ${check.reason}`);
+        setError(
+        "The selected file is empty (0 bytes). Please choose a valid file."
+      );
+      return;
+      }
       setCompareFileA(file);
       setError(null);
       // Task A: Large file check for compare uploads
@@ -556,6 +692,14 @@ export default function ToolPage() {
   const handleCompareFileB = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      const check = validateFile(file);
+      if (!check.valid) {
+        console.warn(`Compare File B skipped: ${check.reason}`);
+        setError(
+        "The selected file is empty (0 bytes). Please choose a valid file."
+      );
+      return;
+      }
       setCompareFileB(file);
       setError(null);
       // Task A: Large file check for compare uploads
@@ -636,6 +780,138 @@ export default function ToolPage() {
     if (accept.includes(".jpg") || accept.includes(".jpeg")) return <ImageIcon className="w-5 h-5" />;
     if (accept.includes(".png")) return <ImageIcon className="w-5 h-5" />;
     return <FileText className="w-5 h-5" />;
+  };
+
+  // ── Cloud Import Handlers ──
+  const handleGoogleDriveImport = async () => {
+    if (cloudLoading) return;
+    setCloudLoading(true);
+    try {
+      const driveFiles = await openGoogleDrivePicker();
+      toast({
+        title: `Importing ${driveFiles.length} file(s) from Google Drive...`,
+      });
+
+      const importedFiles: File[] = [];
+      for (const driveFile of driveFiles) {
+        const imported = await downloadGoogleDriveFile(driveFile.id, driveFile.token);
+        const file = new File([imported.data], imported.name, {
+          type: imported.mimeType,
+        });
+        importedFiles.push(file);
+      }
+
+      if (importedFiles.length > 0) {
+        handleFileSelection(importedFiles);
+        toast({
+          title: `${importedFiles.length} file(s) imported from Google Drive!`,
+          description: importedFiles.map((f) => f.name).join(", "),
+        });
+      }
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        !err.message.includes("cancelled") &&
+        !err.message.includes("Cancel") &&
+        !err.message.includes("No files selected")
+      ) {
+        toast({
+          title: "Google Drive import failed",
+          description: err.message,
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  const handleDropboxImport = async () => {
+    if (cloudLoading) return;
+    setCloudLoading(true);
+    try {
+      const dropboxFiles = await openDropboxChooser();
+      toast({
+        title: `Importing ${dropboxFiles.length} file(s) from Dropbox...`,
+      });
+
+      const importedFiles: File[] = [];
+      for (const dbFile of dropboxFiles) {
+        const imported = await downloadDropboxFile(dbFile.link, dbFile.name);
+        const file = new File([imported.data], imported.name, {
+          type: imported.mimeType,
+        });
+        importedFiles.push(file);
+      }
+
+      if (importedFiles.length > 0) {
+        handleFileSelection(importedFiles);
+        toast({
+          title: `${importedFiles.length} file(s) imported from Dropbox!`,
+          description: importedFiles.map((f) => f.name).join(", "),
+        });
+      }
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        !err.message.includes("cancelled") &&
+        !err.message.includes("Cancel") &&
+        !err.message.includes("No PDF files")
+      ) {
+        toast({
+          title: "Dropbox import failed",
+          description: err.message,
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  // ── Cloud Save Handlers ──
+  const handleSaveToGoogleDrive = async () => {
+    if (!processResult?.success || !processResult.outputFiles[0] || cloudLoading) return;
+    setCloudLoading(true);
+    const file = processResult.outputFiles[0];
+    try {
+      toast({ title: "Uploading to Google Drive..." });
+      await uploadToGoogleDrive(file.data, file.name);
+      toast({
+        title: "Saved to Google Drive! ✅",
+        description: file.name,
+      });
+    } catch (err) {
+      toast({
+        title: "Failed to save to Google Drive",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  const handleSaveToDropbox = async () => {
+    if (!processResult?.success || !processResult.outputFiles[0] || cloudLoading) return;
+    setCloudLoading(true);
+    const file = processResult.outputFiles[0];
+    try {
+      toast({ title: "Connecting to Dropbox..." });
+      await saveToDropbox(file.data, file.name);
+      toast({
+        title: "Saved to Dropbox! ✅",
+        description: `/PdfCrux/${file.name}`,
+      });
+    } catch (err) {
+      toast({
+        title: "Failed to save to Dropbox",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setCloudLoading(false);
+    }
   };
 
   // Handle real file download
@@ -775,6 +1051,16 @@ export default function ToolPage() {
                   fileInputBRef={fileInputBRef}
                   onFileAInput={handleCompareFileA}
                   onFileBInput={handleCompareFileB}
+                  onDropFileA={(file) => {
+                    const check = validateFile(file);
+                    if (check.valid) { setCompareFileA(file); setError(null); }
+                    else { console.warn(`Compare File A drop skipped: ${check.reason}`); setError("The dropped file is empty or invalid. Please try again."); }
+                  }}
+                  onDropFileB={(file) => {
+                    const check = validateFile(file);
+                    if (check.valid) { setCompareFileB(file); setError(null); }
+                    else { console.warn(`Compare File B drop skipped: ${check.reason}`); setError("The dropped file is empty or invalid. Please try again."); }
+                  }}
                   onRemoveA={() => setCompareFileA(null)}
                   onRemoveB={() => setCompareFileB(null)}
                   acceptTypes={tool.acceptTypes}
@@ -828,6 +1114,47 @@ export default function ToolPage() {
                           {tool.maxFileSize || "100MB"}
                           {tool.multipleFiles && " • Multiple files allowed"}
                         </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Cloud Import Buttons — below empty drop zone */}
+                  {uploadedFiles.length === 0 && !config.dualUpload && (
+                    <div className="mt-4">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="h-px bg-border flex-1" />
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">
+                          or import from cloud
+                        </span>
+                        <div className="h-px bg-border flex-1" />
+                      </div>
+                      <div className="flex items-center gap-3 justify-center">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-2"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleGoogleDriveImport();
+                          }}
+                          disabled={cloudLoading}
+                        >
+                          <FolderOpen className="w-4 h-4 text-amber-600" />
+                          Google Drive
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-2"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDropboxImport();
+                          }}
+                          disabled={cloudLoading}
+                        >
+                          <Archive className="w-4 h-4 text-sky-600" />
+                          Dropbox
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -1124,14 +1451,36 @@ export default function ToolPage() {
 
               <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
                 {processResult?.success && (
-                  <Button
-                    size="lg"
-                    className="h-12 px-8 text-base font-semibold gap-2 shadow-lg shadow-primary/20"
-                    onClick={handleDownload}
-                  >
-                    <Download className="w-5 h-5" />
-                    {config.outputLabel || "Download File"}
-                  </Button>
+                  <>
+                    <Button
+                      size="lg"
+                      className="h-12 px-8 text-base font-semibold gap-2 shadow-lg shadow-primary/20"
+                      onClick={handleDownload}
+                    >
+                      <Download className="w-5 h-5" />
+                      {config.outputLabel || "Download File"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="h-12 px-4 text-sm gap-2"
+                      onClick={handleSaveToGoogleDrive}
+                      disabled={cloudLoading}
+                    >
+                      <FolderOpen className="w-4 h-4 text-amber-600" />
+                      Google Drive
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="h-12 px-4 text-sm gap-2"
+                      onClick={handleSaveToDropbox}
+                      disabled={cloudLoading}
+                    >
+                      <Archive className="w-4 h-4 text-sky-600" />
+                      Dropbox
+                    </Button>
+                  </>
                 )}
                 <Button
                   variant="outline"
