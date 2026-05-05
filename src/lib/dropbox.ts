@@ -131,6 +131,109 @@ export async function downloadDropboxFile(link: string, fileName: string): Promi
   };
 }
 
+/**
+ * Authenticate with Dropbox via popup-based implicit grant flow.
+ * Returns an access token that can be used for API calls.
+ */
+async function getDropboxAccessToken(): Promise<string> {
+  if (!env.dropbox.isConfigured) {
+    throw new Error("Dropbox is not configured");
+  }
+
+  const REDIRECT_URI = `${window.location.origin}`;
+  const AUTH_URL = `https://www.dropbox.com/oauth2/authorize?client_id=${env.dropbox.appKey}&response_type=token&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
+
+  return new Promise((resolve, reject) => {
+    const popup = window.open(
+      AUTH_URL,
+      "dropbox_auth",
+      "width=500,height=600,scrollbars=yes"
+    );
+
+    if (!popup) {
+      return reject(new Error("Please allow popups to connect with Dropbox"));
+    }
+
+    const timer = setInterval(() => {
+      try {
+        // Try to read the URL from the popup after redirect
+        const url = new URL(popup.location.href);
+
+        // Check for access_token in URL fragment (#access_token=...)
+        const hash = popup.location.hash;
+        if (hash && hash.includes("access_token=")) {
+          clearInterval(timer);
+          popup.close();
+          const match = hash.match(/access_token=([^&]*)/);
+          if (match && match[1]) {
+            resolve(decodeURIComponent(match[1]));
+          } else {
+            reject(new Error("No access token in response"));
+          }
+        }
+
+        // Check for error
+        if (hash && hash.includes("error=")) {
+          clearInterval(timer);
+          popup.close();
+          reject(new Error("Dropbox authorization denied"));
+        }
+      } catch {
+        // Cross-origin error — popup is still on Dropbox's auth page, keep polling
+      }
+
+      // Popup was closed by user
+      if (popup.closed) {
+        clearInterval(timer);
+        reject(new Error("Authorization window was closed"));
+      }
+    }, 400);
+
+    // Timeout after 3 minutes
+    setTimeout(() => {
+      clearInterval(timer);
+      if (!popup.closed) popup.close();
+      reject(new Error("Authorization timed out"));
+    }, 180000);
+  });
+}
+
+/**
+ * Save a processed file to Dropbox using the Files API.
+ * Opens a popup for OAuth if needed, then uploads the file to /PdfCrux/.
+ */
+export async function saveToDropbox(
+  fileData: ArrayBuffer | Uint8Array,
+  fileName: string,
+): Promise<void> {
+  const accessToken = await getDropboxAccessToken();
+  const buffer = fileData instanceof ArrayBuffer ? new Uint8Array(fileData) : fileData;
+
+  // Dropbox API: /2/files/upload (simple upload for files < 150MB)
+  const response = await fetch("https://content.dropboxapi.com/2/files/upload", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/octet-stream",
+      "Dropbox-API-Arg": JSON.stringify({
+        path: `/PdfCrux/${fileName}`,
+        mode: "add",
+        autorename: true,
+        mute: false,
+      }),
+    },
+    body: buffer.buffer as ArrayBuffer,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(
+      (errorData as Record<string, Record<string, string>>)?.error_summary?.toString() ||
+      `Dropbox upload failed: ${response.statusText}`
+    );
+  }
+}
+
 export const isDropboxReady = env.dropbox.isConfigured;
 
 /** Dropbox app key for Chooser initialization */
