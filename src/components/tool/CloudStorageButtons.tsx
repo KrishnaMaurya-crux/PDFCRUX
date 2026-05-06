@@ -3,262 +3,134 @@
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
 import { pickFromGoogleDrive, isGoogleDriveReady } from "@/lib/google-drive";
-import { saveToGoogleDrive } from "@/lib/google-drive";
 import { pickFromDropbox, isDropboxReady } from "@/lib/dropbox";
-import { saveToDropbox } from "@/lib/dropbox";
 import { useToast } from "@/hooks/use-toast";
 
-// ============================================================
-// Props
-// ============================================================
 interface CloudStorageButtonsProps {
   mode: "upload" | "download";
   onFilesSelected?: (files: File[]) => void;
-  onCloudSave?: (provider: "google-drive" | "dropbox") => Promise<void>;
+  onCloudSave?: (provider: "google-drive" | "dropbox") => void;
   acceptTypes?: string;
   className?: string;
 }
 
-// ============================================================
-// Validation helper
-// ============================================================
+// ── Official Google Drive SVG logo (multi-color triangle) ──────────
+function GoogleDriveLogo() {
+  return (
+    <svg viewBox="0 0 87.3 78" className="w-9 h-9" xmlns="http://www.w3.org/2000/svg">
+      <path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da" />
+      <path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-20.4 35.3c-.8 1.4-1.2 2.95-1.2 4.5h27.5z" fill="#00ac47" />
+      <path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.5l5.4 13.15z" fill="#ea4335" />
+      <path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d" />
+      <path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc" />
+      <path d="m73.4 26.5-10.2-17.7c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 23.8h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00" />
+    </svg>
+  );
+}
+
+// ── Official Dropbox SVG logo (open box, all #0061FF) ──────────────
+function DropboxLogo() {
+  return (
+    <svg viewBox="0 0 94 78" className="w-9 h-9" xmlns="http://www.w3.org/2000/svg">
+      <path d="m47 24.5-23.5-13.5-23.5 13.5 23.5 13.5z" fill="#0061FF" />
+      <path d="m0 28.5v26l23.5 13.5v-26z" fill="#0061FF" />
+      <path d="m47 57.5v26l23.5-13.5v-26z" fill="#0061FF" />
+      <path d="m94 28.5-23.5-13.5-23.5 13.5v26l23.5-13.5 23.5-13.5z" fill="#0061FF" />
+      <path d="m47 51.5 23.5 13.5v-26l-23.5 13.5z" fill="#0061FF" />
+    </svg>
+  );
+}
+
 function isValidFile(file: unknown): file is File {
-  return file instanceof File && file.name.length > 0 && file.size > 0;
+  return file instanceof File && file.name.trim().length > 0 && file.size > 0;
 }
 
-// ============================================================
-// Google Drive Logo (multi-color official)
-// ============================================================
-function GoogleDriveLogo({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 87.3 78"
-      className={className}
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8H0c0 1.55.4 3.1 1.2 4.5l5.4 9.35z" fill="#0066da" />
-      <path d="M43.65 25L29.9 1.2c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44A9.06 9.06 0 000 52.9h27.5L43.65 25z" fill="#00ac47" />
-      <path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H59.85l5.4 9.35 8.3 14.45z" fill="#ea4335" />
-      <path d="M43.65 25L57.4 1.2c-1.35-.8-2.9-1.2-4.5-1.2H34.4c-1.6 0-3.15.45-4.5 1.2L43.65 25z" fill="#00832d" />
-      <path d="M59.85 52.9H27.5l13.15 22.9 13.75 23.8c1.35-.8 2.5-1.9 3.3-3.3l16.15-28.05-5.4-9.35z" fill="#2684fc" />
-      <path d="M73.4 26.5l-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3L43.65 25 59.85 52.9H86.3c0-1.55-.4-3.1-1.2-4.5L73.4 26.5z" fill="#ffba00" />
-    </svg>
-  );
-}
-
-// ============================================================
-// Dropbox Logo (official open box, all paths #0061FF)
-// ============================================================
-function DropboxLogo({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 94 78"
-      className={className}
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <path d="M23.5 0L0 15l23.5 15L47 15zm0 0" fill="#0061FF" />
-      <path d="M47 39L23.5 24 0 39l23.5 15zm0 0" fill="#0061FF" />
-      <path d="M70.5 0L47 15l23.5 15L94 15zm0 0" fill="#0061FF" />
-      <path d="M47 39l23.5-15L94 39 70.5 54zm0 0" fill="#0061FF" />
-      <path d="M23.5 54L47 39 23.5 24 0 39l23.5 15zm0 0" fill="#0061FF" />
-      <path d="M23.5 54L47 69 70.5 54 94 69 70.5 78 47 63 23.5 78 0 63 23.5 54zm0 0" fill="#0061FF" />
-    </svg>
-  );
-}
-
-// ============================================================
-// CloudStorageButtons Component
-// ============================================================
 export default function CloudStorageButtons({
   mode,
   onFilesSelected,
   onCloudSave,
-  acceptTypes,
-  className = "",
 }: CloudStorageButtonsProps) {
   const [loading, setLoading] = useState<"google-drive" | "dropbox" | null>(null);
   const { toast } = useToast();
 
-  // ----------------------------------------------------------
-  // Google Drive handler
-  // ----------------------------------------------------------
   const handleGoogleDrive = async () => {
     if (loading) return;
 
     if (mode === "download") {
-      // Save mode
-      if (!onCloudSave) {
-        toast({
-          title: "Save not available",
-          description: "No save handler provided.",
-          variant: "destructive",
-        });
-        return;
-      }
-      setLoading("google-drive");
-      try {
-        await onCloudSave("google-drive");
-      } catch {
-        toast({
-          title: "Google Drive save failed",
-          description: "Could not save file to Google Drive.",
-          variant: "destructive",
-        });
-      } finally {
-        setLoading(null);
-      }
+      onCloudSave?.("google-drive");
       return;
     }
 
-    // Upload / import mode
     if (!isGoogleDriveReady) {
-      toast({
-        title: "Google Drive not configured",
-        description: "Please set up Google Drive credentials to import files.",
-        variant: "destructive",
-      });
+      toast({ title: "Google Drive not configured", description: "Set NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID and API_KEY in environment.", variant: "destructive" });
       return;
     }
 
     setLoading("google-drive");
     try {
-      const files = await pickFromGoogleDrive(acceptTypes);
-      const validFiles = files.filter(isValidFile);
-
-      if (validFiles.length === 0) {
-        toast({
-          title: "No valid files",
-          description: "No valid files were imported from Google Drive.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      onFilesSelected?.(validFiles);
+      const files = await pickFromGoogleDrive();
+      const valid = files.filter(isValidFile);
+      if (valid.length > 0) onFilesSelected?.(valid);
+      if (valid.length === 0 && files.length > 0) toast({ title: "No valid files", description: "Selected files were empty or invalid.", variant: "destructive" });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      // Don't show toast for user cancellation
-      if (!msg.includes("cancel") && !msg.includes("Cancel")) {
-        toast({
-          title: "Google Drive import failed",
-          description: msg,
-          variant: "destructive",
-        });
-      }
+      const msg = err instanceof Error ? err.message : "Failed to import from Google Drive";
+      if (!msg.toLowerCase().includes("cancel")) toast({ title: "Google Drive error", description: msg, variant: "destructive" });
     } finally {
       setLoading(null);
     }
   };
 
-  // ----------------------------------------------------------
-  // Dropbox handler
-  // ----------------------------------------------------------
   const handleDropbox = async () => {
     if (loading) return;
 
     if (mode === "download") {
-      // Save mode
-      if (!onCloudSave) {
-        toast({
-          title: "Save not available",
-          description: "No save handler provided.",
-          variant: "destructive",
-        });
-        return;
-      }
-      setLoading("dropbox");
-      try {
-        await onCloudSave("dropbox");
-      } catch {
-        toast({
-          title: "Dropbox save failed",
-          description: "Could not save file to Dropbox.",
-          variant: "destructive",
-        });
-      } finally {
-        setLoading(null);
-      }
+      onCloudSave?.("dropbox");
       return;
     }
 
-    // Upload / import mode
     if (!isDropboxReady) {
-      toast({
-        title: "Dropbox not configured",
-        description: "Please set up Dropbox credentials to import files.",
-        variant: "destructive",
-      });
+      toast({ title: "Dropbox not configured", description: "Set NEXT_PUBLIC_DROPBOX_APP_KEY in environment.", variant: "destructive" });
       return;
     }
 
     setLoading("dropbox");
     try {
-      const files = await pickFromDropbox(acceptTypes);
-      const validFiles = files.filter(isValidFile);
-
-      if (validFiles.length === 0) {
-        toast({
-          title: "No valid files",
-          description: "No valid files were imported from Dropbox.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      onFilesSelected?.(validFiles);
+      const files = await pickFromDropbox();
+      const valid = files.filter(isValidFile);
+      if (valid.length > 0) onFilesSelected?.(valid);
+      if (valid.length === 0 && files.length > 0) toast({ title: "No valid files", description: "Selected files were empty or invalid.", variant: "destructive" });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      // Don't show toast for user cancellation
-      if (!msg.includes("cancel") && !msg.includes("Cancel")) {
-        toast({
-          title: "Dropbox import failed",
-          description: msg,
-          variant: "destructive",
-        });
-      }
+      const msg = err instanceof Error ? err.message : "Failed to import from Dropbox";
+      if (!msg.toLowerCase().includes("cancel")) toast({ title: "Dropbox error", description: msg, variant: "destructive" });
     } finally {
       setLoading(null);
     }
   };
 
-  // ----------------------------------------------------------
-  // Render — BOTH buttons ALWAYS rendered
-  // ----------------------------------------------------------
-  const googleDriveTooltip =
-    mode === "download" ? "Save to Google Drive" : "Import from Google Drive";
-  const dropboxTooltip =
-    mode === "download" ? "Save to Dropbox" : "Import from Dropbox";
+  const btnBase = "flex-shrink-0 w-14 h-14 rounded-full bg-white dark:bg-card border-2 border-border shadow-md hover:shadow-xl hover:scale-110 transition-all duration-200 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100";
 
   return (
-    <div className={`flex items-center gap-3 ${className}`}>
-      {/* Google Drive Button — ALWAYS rendered */}
+    <div className="flex items-center gap-4">
+      {/* Google Drive — ALWAYS visible */}
       <button
+        type="button"
         onClick={handleGoogleDrive}
         disabled={loading !== null}
-        title={googleDriveTooltip}
-        className="w-16 h-16 rounded-full bg-white dark:bg-card border-2 border-border shadow-md hover:shadow-xl hover:scale-110 hover:border-blue-300 transition-all duration-200 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:shadow-md"
+        title={mode === "download" ? "Save to Google Drive" : "Import from Google Drive"}
+        className={`${btnBase} hover:border-blue-300 hover:shadow-blue-200/50`}
       >
-        {loading === "google-drive" ? (
-          <Loader2 className="w-7 h-7 animate-spin text-muted-foreground" />
-        ) : (
-          <GoogleDriveLogo className="w-9 h-9" />
-        )}
-        <span className="sr-only">{googleDriveTooltip}</span>
+        {loading === "google-drive" ? <Loader2 className="w-7 h-7 animate-spin text-blue-500" /> : <GoogleDriveLogo />}
       </button>
 
-      {/* Dropbox Button — ALWAYS rendered */}
+      {/* Dropbox — ALWAYS visible */}
       <button
+        type="button"
         onClick={handleDropbox}
         disabled={loading !== null}
-        title={dropboxTooltip}
-        className="w-16 h-16 rounded-full bg-white dark:bg-card border-2 border-border shadow-md hover:shadow-xl hover:scale-110 hover:border-[#0061FF] transition-all duration-200 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:shadow-md"
+        title={mode === "download" ? "Save to Dropbox" : "Import from Dropbox"}
+        className={`${btnBase} hover:border-[#0061FF] hover:shadow-blue-200/50`}
       >
-        {loading === "dropbox" ? (
-          <Loader2 className="w-7 h-7 animate-spin text-muted-foreground" />
-        ) : (
-          <DropboxLogo className="w-9 h-9" />
-        )}
-        <span className="sr-only">{dropboxTooltip}</span>
+        {loading === "dropbox" ? <Loader2 className="w-7 h-7 animate-spin text-[#0061FF]" /> : <DropboxLogo />}
       </button>
     </div>
   );
