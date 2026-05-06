@@ -53,6 +53,8 @@ export const googleDrive = {
   apiKey: process.env.GOOGLE_DRIVE_API_KEY || "",
   appId: process.env.GOOGLE_DRIVE_APP_ID || "",
   clientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || "",
+  scopes:
+    "email profile openid https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata",
   get isConfigured() {
     return isSet(this.clientId) && isSet(this.apiKey);
   },
@@ -120,7 +122,7 @@ export function getEnvHealth(): HealthStatus[] {
       name: "Google Drive Import",
       configured: googleDrive.isConfigured,
       details: googleDrive.isConfigured
-        ? "Client ID + API Key ready (5 scopes: file, readonly, metadata, appdata, install)"
+        ? "Client ID + API Key ready"
         : "Missing GOOGLE_DRIVE_CLIENT_ID or API_KEY",
     },
     {

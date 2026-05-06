@@ -550,18 +550,7 @@ export async function organizePDF(
         stats: { originalSize: file.size, outputSize: data.length },
       };
     } else if (mode === "reorder") {
-      // Check for DnD page-order first (from drag-and-drop reordering)
-      const pageOrderInput = String(options["page-order"] || "");
-      let orderedIndices: number[];
-
-      if (pageOrderInput) {
-        // Parse comma-separated page numbers (e.g., "3,1,2,4") preserving order
-        orderedIndices = pageOrderInput
-          .split(",")
-          .map((s) => parseInt(s.trim(), 10))
-          .filter((n) => !isNaN(n) && n >= 1 && n <= pages.length)
-          .map((n) => n - 1); // Convert to 0-based indices
-      } else if (pageIndices.length === 0) {
+      if (pageIndices.length === 0) {
         // Just return original
         const data = await pdf.save();
         return {
@@ -572,12 +561,9 @@ export async function organizePDF(
           message: "No page order specified, returning original",
           stats: { originalSize: file.size, outputSize: data.length },
         };
-      } else {
-        orderedIndices = pageIndices;
       }
-
       const newPdf = await PDFDocument.create();
-      const copiedPages = await newPdf.copyPages(pdf, orderedIndices);
+      const copiedPages = await newPdf.copyPages(pdf, pageIndices);
       copiedPages.forEach((p) => newPdf.addPage(p));
       const data = await newPdf.save();
       return {
@@ -589,7 +575,7 @@ export async function organizePDF(
             size: data.length,
           },
         ],
-        message: `Reordered ${orderedIndices.length} page(s)`,
+        message: `Reordered ${pageIndices.length} page(s)`,
         stats: { originalSize: file.size, outputSize: data.length },
       };
     } else if (mode === "insert") {
@@ -718,7 +704,6 @@ async function estimateSizeFromJpgs(
 /**
  * Render all PDF pages to canvases at a given DPI.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function renderPages(
   pdfDoc: any,
   totalPages: number,
