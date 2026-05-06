@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getEnvHealth, supabase, r2 } from "@/lib/env";
+import { getEnvHealth, getEnvDebug, supabase, r2 } from "@/lib/env";
 
 export async function GET() {
   const healthChecks = getEnvHealth();
@@ -37,6 +37,7 @@ export async function GET() {
     timestamp: new Date().toISOString(),
     checks: healthChecks,
     liveChecks,
+    envDebug: getEnvDebug(),
     summary: {
       total: healthChecks.length,
       configured: healthChecks.filter((h) => h.configured).length,
