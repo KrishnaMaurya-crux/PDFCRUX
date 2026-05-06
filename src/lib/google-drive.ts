@@ -1,198 +1,365 @@
 /**
- * Google Drive Integration — Import files from user's Google Drive
+ * Google Drive Integration — Full Import / Save
  *
- * Uses Google Picker API (client-side) + server-side download via Google Drive API v3
- * Requires: GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_API_KEY, GOOGLE_DRIVE_APP_ID
- *
- * Flow:
- * 1. Client opens Google Picker (gapi.picker)
- * 2. User selects file(s)
- * 3. Client gets file IDs + tokens
- * 4. Server downloads files using access token
- * 5. Files are processed locally
+ * Uses Google Identity Services (GIS) + Picker API + Drive API v3
+ * Requires: NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID, NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY,
+ *           NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID
  */
 
 import { env } from "@/lib/env";
 
 // ============================================================
-// Google Drive OAuth Scopes
-// These 5 scopes are required for full Google Drive integration:
-//   1. userinfo.email     — Read user's email address
-//   2. userinfo.profile   — Read user's basic profile info
-//   3. openid             — OpenID Connect authentication
-//   4. drive.file         — Per-file access (created/opened by this app)
-//   5. drive.appdata      — Access app's hidden data folder
+// Scopes
 // ============================================================
-export const GOOGLE_DRIVE_SCOPES = [
-  "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile",
-  "openid",
-  "https://www.googleapis.com/auth/drive.file",
-  "https://www.googleapis.com/auth/drive.appdata",
-];
+export const GOOGLE_DRIVE_SCOPES =
+  "email profile openid https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata";
 
-// Discovery doc URI for Google Identity Services (GIS)
-const DISCOVERY_DOC = "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest";
+/** Computed at module level */
+export const isGoogleDriveReady = env.googleDrive.isConfigured;
 
-export interface GoogleDriveFile {
-  id: string;
-  name: string;
-  mimeType: string;
-  size: number;
-  token: string;
-}
+// ============================================================
+// TypeScript declarations for Google APIs
+// ============================================================
 
-export interface ImportedFile {
-  name: string;
-  data: ArrayBuffer;
-  mimeType: string;
-  size: number;
-}
+/* eslint-disable @typescript-eslint/no-namespace */
+declare namespace google {
+  namespace accounts {
+    namespace oauth2 {
+      interface TokenResponse {
+        access_token: string;
+        token_type: string;
+        expires_in: number;
+        scope: string;
+        error?: string;
+        error_description?: string;
+      }
 
-/**
- * Load Google Identity Services (GIS) and Picker API scripts dynamically.
- * GIS provides the modern OAuth token flow required by the Picker.
- */
-export function loadGooglePickerAPI(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (typeof window === "undefined") return reject(new Error("Not in browser"));
+      interface TokenClient {
+        requestAccessToken: (config?: { scope?: string; prompt?: string }) => void;
+      }
 
-    // Check if already loaded
-    if ((window as Record<string, unknown>).google?.picker) {
-      return resolve();
+      function initTokenClient(config: {
+        client_id: string;
+        scope: string;
+        callback: (response: google.accounts.oauth2.TokenResponse) => void;
+      }): google.accounts.oauth2.TokenClient;
+    }
+  }
+
+  namespace picker {
+    interface PickerCallbackData {
+      action: string;
+      docs?: PickerDocument[];
+      [key: string]: unknown;
     }
 
-    if (!env.googleDrive.isConfigured) {
-      return reject(new Error("Google Drive is not configured. Missing API keys."));
+    interface PickerDocument {
+      id: string;
+      name: string;
+      mimeType: string;
+      size?: string;
+      url?: string;
+      token?: string;
+      [key: string]: unknown;
     }
 
-    // Load the gapi client script first
-    const script = document.createElement("script");
-    script.src = "https://apis.google.com/js/api.js";
-    script.onload = () => {
-      // Load picker and client libraries
-      (window as Record<string, unknown>).gapi?.load("client:picker", {
-        callback: () => resolve(),
-        onerror: () => reject(new Error("Failed to load Google Picker")),
-      });
+    interface DocsView {
+      setMimeTypes: (types: string) => DocsView;
+    }
+
+    interface View {
+      [key: string]: string;
+    }
+
+    interface Picker {
+      setVisible: (visible: boolean) => void;
+    }
+
+    interface PickerBuilder {
+      setAppId: (appId: string) => PickerBuilder;
+      setOAuthToken: (token: string) => PickerBuilder;
+      setDeveloperKey: (key: string) => PickerBuilder;
+      setCallback: (callback: (data: PickerCallbackData) => void) => PickerBuilder;
+      setTitle: (title: string) => PickerBuilder;
+      addView: (view: DocsView) => PickerBuilder;
+      enableFeature: (feature: string) => PickerBuilder;
+      build: () => Picker;
+    }
+
+    namespace Feature {
+      const MULTISELECT_ENABLED: string;
+    }
+  }
+}
+
+declare global {
+  interface Window {
+    google: typeof google;
+    gapi?: {
+      load: (module: string, config?: { callback: () => void; onerror?: () => void }) => void;
     };
-    script.onerror = () => reject(new Error("Failed to load Google API script"));
+  }
+}
+/* eslint-enable @typescript-eslint/no-namespace */
+
+// ============================================================
+// Internal state
+// ============================================================
+let tokenClient: google.accounts.oauth2.TokenClient | null = null;
+let currentAccessToken: string | null = null;
+let scriptsLoaded = false;
+
+// ============================================================
+// TokenExpiredError
+// ============================================================
+export class TokenExpiredError extends Error {
+  constructor(message = "Google Drive access token expired") {
+    super(message);
+    this.name = "TokenExpiredError";
+  }
+}
+
+// ============================================================
+// Script Loading
+// ============================================================
+const loadedScripts = new Set<string>();
+
+function loadScript(src: string, id: string): Promise<void> {
+  if (loadedScripts.has(src)) return Promise.resolve();
+  if (document.getElementById(id)) {
+    loadedScripts.add(src);
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.id = id;
+    script.async = true;
+    script.onload = () => {
+      loadedScripts.add(src);
+      resolve();
+    };
+    script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
     document.head.appendChild(script);
   });
 }
 
-/**
- * Open Google Picker for PDF file selection.
- * Uses TokenClient (GIS) to obtain an OAuth token with all 5 Drive scopes.
- * Returns selected files with download tokens.
- */
-export async function openGoogleDrivePicker(): Promise<GoogleDriveFile[]> {
-  await loadGooglePickerAPI();
+// ============================================================
+// Load all Google Drive scripts (idempotent)
+// ============================================================
+export async function loadGoogleDriveScripts(): Promise<void> {
+  if (scriptsLoaded && tokenClient) return;
+
+  if (!env.googleDrive.isConfigured) {
+    throw new Error("Google Drive is not configured. Missing API keys.");
+  }
+
+  // Step 1: GIS script
+  await loadScript("https://accounts.google.com/gsi/client", "google-gsi");
+
+  // Step 2: Init token client
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: env.googleDrive.clientId,
+    scope: env.googleDrive.scopes,
+    callback: handleTokenResponse,
+  });
+
+  // Step 3: gapi script
+  await loadScript("https://apis.google.com/js/api.js", "google-gapi");
+
+  // Step 4: Picker module
+  await new Promise<void>((resolve, reject) => {
+    window.gapi?.load("picker", {
+      callback: () => resolve(),
+      onerror: () => reject(new Error("Failed to load Google Picker module")),
+    });
+  });
+
+  scriptsLoaded = true;
+}
+
+// ============================================================
+// Token handling
+// ============================================================
+let tokenResolve: ((token: string) => void) | null = null;
+let tokenReject: ((err: Error) => void) | null = null;
+
+function handleTokenResponse(response: google.accounts.oauth2.TokenResponse): void {
+  if (response.error) {
+    if (tokenReject) {
+      tokenReject(new Error(`Token error: ${response.error} — ${response.error_description || "Unknown"}`));
+      tokenReject = null;
+      tokenResolve = null;
+    }
+    return;
+  }
+  if (response.access_token) {
+    currentAccessToken = response.access_token;
+    if (tokenResolve) {
+      tokenResolve(response.access_token);
+      tokenResolve = null;
+      tokenReject = null;
+    }
+  }
+}
+
+function requestAccessToken(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (currentAccessToken) {
+      resolve(currentAccessToken);
+      return;
+    }
+    if (!tokenClient) {
+      reject(new Error("Token client not initialized. Call loadGoogleDriveScripts() first."));
+      return;
+    }
+    tokenResolve = resolve;
+    tokenReject = reject;
+    tokenClient.requestAccessToken({ prompt: "" });
+  });
+}
+
+// ============================================================
+// Download files from Drive
+// ============================================================
+async function downloadOneFile(fileId: string, fileName: string, accessToken: string): Promise<File> {
+  const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,size,mimeType`;
+  const metaResponse = await fetch(metaUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (metaResponse.status === 401) throw new TokenExpiredError();
+  if (!metaResponse.ok) throw new Error(`Failed to get file metadata: ${metaResponse.statusText}`);
+  const metadata = await metaResponse.json();
+
+  const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const response = await fetch(downloadUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (response.status === 401) throw new TokenExpiredError();
+  if (!response.ok) throw new Error(`Failed to download file: ${response.statusText}`);
+
+  const arrayBuffer = await response.arrayBuffer();
+  return new File([arrayBuffer], fileName, {
+    type: metadata.mimeType || "application/octet-stream",
+  });
+}
+
+async function downloadFiles(files: { id: string; name: string }[], accessToken: string): Promise<File[]> {
+  const results: File[] = [];
+  for (let i = 0; i < files.length; i += 5) {
+    const batch = files.slice(i, i + 5);
+    try {
+      const batchResults = await Promise.all(
+        batch.map((f) => downloadOneFile(f.id, f.name, accessToken))
+      );
+      results.push(...batchResults);
+    } catch (err) {
+      if (err instanceof TokenExpiredError) {
+        currentAccessToken = null;
+        const newToken = await requestAccessToken();
+        const batchResults = await Promise.all(
+          batch.map((f) => downloadOneFile(f.id, f.name, newToken))
+        );
+        results.push(...batchResults);
+      } else {
+        throw err;
+      }
+    }
+  }
+  return results;
+}
+
+// ============================================================
+// Pick files from Google Drive (main entry point)
+// ============================================================
+export async function pickFromGoogleDrive(acceptTypes?: string): Promise<File[]> {
+  await loadGoogleDriveScripts();
+  const accessToken = await requestAccessToken();
+  if (!accessToken) throw new Error("Failed to obtain access token");
 
   return new Promise((resolve, reject) => {
-    if (!env.googleDrive.isConfigured) {
-      return reject(new Error("Google Drive not configured"));
-    }
+    try {
+      const picker = (window as any).google.picker.PickerBuilder
+        ? new (window as any).google.picker.PickerBuilder()
+        : null;
 
-    // Obtain an OAuth access token via Google Identity Services (TokenClient)
-    // This ensures all 5 Drive scopes are granted before the Picker opens.
-    const tokenClient = (
-      window as Record<string, Record<string, new (opts: Record<string, unknown>) => {
-        callback: (resp: Record<string, unknown>) => void;
-        requestAccessToken: (opts?: Record<string, unknown>) => void;
-      }>>
-    ).google?.accounts?.oauth2;
+      if (!picker) {
+        reject(new Error("Google Picker not available. Make sure scripts are loaded."));
+        return;
+      }
 
-    if (!tokenClient) {
-      return reject(new Error("Google Identity Services not available. Please reload the page."));
-    }
-
-    const client = new tokenClient.TokenClient({
-      client_id: env.googleDrive.clientId,
-      scope: GOOGLE_DRIVE_SCOPES.join(" "),
-      callback: (tokenResponse: Record<string, unknown>) => {
-        const accessToken = tokenResponse.access_token as string | undefined;
-        if (!accessToken) {
-          // If there's an error or no token, Picker can still work via developer key
-          // for files that the user shares directly.
-          buildPicker("");
-          return;
-        }
-        buildPicker(accessToken);
-      },
-    });
-
-    client.requestAccessToken({ prompt: "" });
-
-    function buildPicker(oauthToken: string) {
-      const picker = new (
-        window as Record<string, Record<string, new (...args: unknown[]) => unknown>>
-      ).google.picker.PickerBuilder()
+      picker
         .setAppId(env.googleDrive.appId)
-        .setOAuthToken(oauthToken)
+        .setOAuthToken(accessToken)
         .setDeveloperKey(env.googleDrive.apiKey)
-        .setCallback((data: Record<string, unknown>) => {
-          const action = data.action as string;
-          if (action === "google.picker.action.PICKED") {
-            const docs = (data.docs as GoogleDriveFile[]) || [];
-            if (docs.length > 0) {
-              resolve(docs);
-            } else {
-              reject(new Error("No files selected"));
-            }
-          } else if (action === "google.picker.action.CANCEL") {
+        .setCallback((data: google.picker.PickerCallbackData) => {
+          if (data.action === "google.picker.action.PICKED") {
+            const docs = data.docs || [];
+            if (docs.length === 0) { reject(new Error("No files selected")); return; }
+            downloadFiles(docs.map((d) => ({ id: d.id, name: d.name })), accessToken)
+              .then(resolve)
+              .catch(reject);
+          } else if (data.action === "google.picker.action.CANCEL") {
             reject(new Error("Picker cancelled"));
           }
         })
-        .setTitle("Select PDF files from Google Drive")
-        .setMimeTypes("application/pdf")
-        .enableFeature(
-          (window as Record<string, Record<string, string>>).google?.picker?.Feature
-            ?.MULTISELECT_ENABLED || ""
-        )
-        .build();
-
-      picker.setVisible(true);
+        .setTitle("Select files from Google Drive")
+        .addView(new (window as any).google.picker.DocsView())
+        .enableFeature((window as any).google.picker.Feature.MULTISELECT_ENABLED)
+        .build()
+        .setVisible(true);
+    } catch (err) {
+      reject(err);
     }
   });
 }
 
-/**
- * Download a file from Google Drive using access token.
- * Works both client-side and server-side.
- * Prefers `fields=name,size,mimeType` on the download URL to avoid a second request.
- */
-export async function downloadGoogleDriveFile(
-  fileId: string,
-  accessToken: string
-): Promise<ImportedFile> {
-  // Use alt=media with fields to get both metadata + content in one call
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&fields=name,size,mimeType`;
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to download: ${response.statusText}`);
+// ============================================================
+// Save file to Google Drive
+// ============================================================
+export async function saveToGoogleDrive(
+  fileData: ArrayBuffer | Blob,
+  fileName: string,
+  accessToken?: string
+): Promise<string> {
+  let token = accessToken;
+  if (!token) {
+    if (!currentAccessToken) await loadGoogleDriveScripts();
+    token = await requestAccessToken();
   }
+  if (!token) throw new Error("No access token available for saving to Google Drive");
 
-  // Google returns metadata in JSON content-type for fields param;
-  // fallback: try to extract name from Content-Disposition header.
-  const disposition = response.headers.get("Content-Disposition") || "";
-  const nameMatch = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";\n]+)"?/i);
-  const fallbackName = nameMatch ? decodeURIComponent(nameMatch[1]) : `drive_${fileId}.pdf`;
+  const blob = fileData instanceof ArrayBuffer ? new Blob([fileData]) : fileData;
+  const mimeType = blob.type || "application/octet-stream";
 
-  const data = await response.arrayBuffer();
+  const boundary = "pdfcrux_" + Math.random().toString(36).slice(2);
+  const metadata = JSON.stringify({ name: fileName, mimeType });
 
-  return {
-    name: fallbackName,
-    data,
-    mimeType: "application/pdf",
-    size: data.byteLength,
-  };
+  const metadataPrefix = new TextEncoder().encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`
+  );
+  const endBytes = new TextEncoder().encode(`\r\n--${boundary}--`);
+  const combined = new Uint8Array(metadataPrefix.byteLength + blob.size + endBytes.byteLength);
+  combined.set(metadataPrefix, 0);
+  combined.set(new Uint8Array(await blob.arrayBuffer()), metadataPrefix.byteLength);
+  combined.set(endBytes, metadataPrefix.byteLength + blob.size);
+
+  const response = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body: combined,
+    }
+  );
+
+  if (response.status === 401) throw new TokenExpiredError();
+  if (!response.ok) throw new Error(`Failed to save to Google Drive: ${response.statusText}`);
+
+  const result = await response.json();
+  return result.id;
 }
-
-export const isGoogleDriveReady = env.googleDrive.isConfigured;

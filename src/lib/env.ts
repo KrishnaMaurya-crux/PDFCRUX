@@ -16,6 +16,24 @@ function isSet(value: string | undefined): boolean {
   return Boolean(value && value.trim().length > 0);
 }
 
+/** Mask a string for debug output: first 6 + "..." + last 4 */
+function mask(value: string | undefined): string {
+  if (!value || value.length < 10) return value ? "****" : "NOT SET";
+  return value.slice(0, 6) + "..." + value.slice(-4);
+}
+
+/** Track which keys have already warned (browser-side only) */
+const _warnedKeys = new Set<string>();
+
+function warnOnce(key: string, label: string) {
+  if (typeof window !== "undefined" && !_warnedKeys.has(key)) {
+    _warnedKeys.add(key);
+    console.warn(
+      `[PdfCrux Env] "${label}" is not configured. ${key} is missing or empty.`
+    );
+  }
+}
+
 // ============================================================
 // 1. SUPABASE (Auth + PostgreSQL)
 // ============================================================
@@ -23,7 +41,12 @@ export const supabase = {
   url: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
   anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "",
   get isConfigured() {
-    return isSet(this.url) && isSet(this.anonKey);
+    const ok = isSet(this.url) && isSet(this.anonKey);
+    if (!ok) {
+      if (!isSet(this.url)) warnOnce("NEXT_PUBLIC_SUPABASE_URL", "Supabase URL");
+      if (!isSet(this.anonKey)) warnOnce("NEXT_PUBLIC_SUPABASE_ANON_KEY", "Supabase Anon Key");
+    }
+    return ok;
   },
 };
 
@@ -37,35 +60,51 @@ export const r2 = {
   bucketName: process.env.R2_BUCKET_NAME || "pdfcrux",
   publicDomain: process.env.R2_PUBLIC_DOMAIN || "",
   get isConfigured() {
-    return (
+    const ok =
       isSet(this.accountId) &&
       isSet(this.accessKeyId) &&
-      isSet(this.secretAccessKey)
-    );
+      isSet(this.secretAccessKey);
+    if (!ok) {
+      if (!isSet(this.accountId)) warnOnce("R2_ACCOUNT_ID", "R2 Account ID");
+      if (!isSet(this.accessKeyId)) warnOnce("R2_ACCESS_KEY_ID", "R2 Access Key ID");
+      if (!isSet(this.secretAccessKey)) warnOnce("R2_SECRET_ACCESS_KEY", "R2 Secret Access Key");
+    }
+    return ok;
   },
 };
 
 // ============================================================
-// 3. GOOGLE DRIVE (Cloud Import)
+// 3. GOOGLE DRIVE (Cloud Import / Save)
 // ============================================================
 export const googleDrive = {
-  clientId: process.env.GOOGLE_DRIVE_CLIENT_ID || "",
-  apiKey: process.env.GOOGLE_DRIVE_API_KEY || "",
-  appId: process.env.GOOGLE_DRIVE_APP_ID || "",
+  clientId: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID || "",
+  apiKey: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY || "",
+  appId: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID || "",
   clientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || "",
+  scopes:
+    "email profile openid https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata",
   get isConfigured() {
-    return isSet(this.clientId) && isSet(this.apiKey);
+    const ok = isSet(this.clientId) && isSet(this.apiKey);
+    if (!ok) {
+      if (!isSet(this.clientId)) warnOnce("NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID", "Google Drive Client ID");
+      if (!isSet(this.apiKey)) warnOnce("NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY", "Google Drive API Key");
+    }
+    return ok;
   },
 };
 
 // ============================================================
-// 4. DROPBOX (Cloud Import)
+// 4. DROPBOX (Cloud Import / Save)
 // ============================================================
 export const dropbox = {
-  appKey: process.env.DROPBOX_APP_KEY || "",
+  appKey: process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || "",
   appSecret: process.env.DROPBOX_APP_SECRET || "",
   get isConfigured() {
-    return isSet(this.appKey);
+    const ok = isSet(this.appKey);
+    if (!ok) {
+      warnOnce("NEXT_PUBLIC_DROPBOX_APP_KEY", "Dropbox App Key");
+    }
+    return ok;
   },
 };
 
@@ -101,7 +140,8 @@ export function getEnvHealth(): HealthStatus[] {
     },
     {
       name: "Database (PostgreSQL)",
-      configured: isSet(process.env.DATABASE_URL) &&
+      configured:
+        isSet(process.env.DATABASE_URL) &&
         !process.env.DATABASE_URL?.startsWith("file:"),
       details: process.env.DATABASE_URL?.startsWith("file:")
         ? "Using local SQLite — must migrate to PostgreSQL for Vercel"
@@ -120,15 +160,15 @@ export function getEnvHealth(): HealthStatus[] {
       name: "Google Drive Import",
       configured: googleDrive.isConfigured,
       details: googleDrive.isConfigured
-        ? "Client ID + API Key ready (5 scopes: userinfo.email, userinfo.profile, openid, drive.file, drive.appdata)"
-        : "Missing GOOGLE_DRIVE_CLIENT_ID or API_KEY",
+        ? "Client ID + API Key ready"
+        : "Missing NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID or API_KEY",
     },
     {
       name: "Dropbox Import",
       configured: dropbox.isConfigured,
       details: dropbox.isConfigured
         ? "App key ready (Chooser API)"
-        : "Missing DROPBOX_APP_KEY",
+        : "Missing NEXT_PUBLIC_DROPBOX_APP_KEY",
     },
     {
       name: "Dodo Payments",
@@ -140,6 +180,23 @@ export function getEnvHealth(): HealthStatus[] {
   ];
 }
 
+/** Masked NEXT_PUBLIC_ env vars for debug display */
+export function getEnvDebug() {
+  return {
+    NEXT_PUBLIC_SUPABASE_URL: mask(process.env.NEXT_PUBLIC_SUPABASE_URL),
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: mask(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+    NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID: mask(process.env.NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID),
+    NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY: mask(process.env.NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY),
+    NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID: mask(process.env.NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID),
+    NEXT_PUBLIC_DROPBOX_APP_KEY: mask(process.env.NEXT_PUBLIC_DROPBOX_APP_KEY),
+    R2_ACCOUNT_ID: mask(process.env.R2_ACCOUNT_ID),
+    R2_BUCKET_NAME: process.env.R2_BUCKET_NAME || "NOT SET",
+    DATABASE_URL: process.env.DATABASE_URL
+      ? (process.env.DATABASE_URL.startsWith("file:") ? "file:... (SQLite)" : mask(process.env.DATABASE_URL))
+      : "NOT SET",
+  };
+}
+
 /** Convenience export */
 export const env = {
   supabase,
@@ -148,4 +205,5 @@ export const env = {
   dropbox,
   dodoPayments,
   getEnvHealth,
+  getEnvDebug,
 } as const;
