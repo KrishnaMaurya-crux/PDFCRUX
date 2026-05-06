@@ -214,8 +214,23 @@ function requestAccessToken(): Promise<string> {
       reject(new Error("Token client not initialized. Call loadGoogleDriveScripts() first."));
       return;
     }
-    tokenResolve = resolve;
-    tokenReject = reject;
+
+    // Safety timeout: if GIS popup is closed without response, reject after 90s
+    const timeoutId = setTimeout(() => {
+      console.warn("[GoogleDrive] Token request timed out after 90s — likely popup closed by user.");
+      tokenResolve = null;
+      tokenReject = null;
+      reject(new Error("Google Drive sign-in timed out. Please try again."));
+    }, 90_000);
+
+    tokenResolve = (token: string) => {
+      clearTimeout(timeoutId);
+      resolve(token);
+    };
+    tokenReject = (err: Error) => {
+      clearTimeout(timeoutId);
+      reject(err);
+    };
     tokenClient.requestAccessToken({ prompt: "" });
   });
 }
@@ -294,6 +309,7 @@ export async function pickFromGoogleDrive(acceptTypes?: string): Promise<File[]>
         .setOAuthToken(accessToken)
         .setDeveloperKey(env.googleDrive.apiKey)
         .setCallback((data: google.picker.PickerCallbackData) => {
+          console.log("[GoogleDrive] Picker callback action:", data.action);
           if (data.action === "google.picker.action.PICKED") {
             const docs = data.docs || [];
             if (docs.length === 0) { reject(new Error("No files selected")); return; }
@@ -301,6 +317,7 @@ export async function pickFromGoogleDrive(acceptTypes?: string): Promise<File[]>
               .then(resolve)
               .catch(reject);
           } else if (data.action === "google.picker.action.CANCEL") {
+            console.log("[GoogleDrive] Picker cancelled by user");
             reject(new Error("Picker cancelled"));
           }
         })

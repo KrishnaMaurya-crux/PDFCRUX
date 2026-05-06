@@ -93,6 +93,12 @@ export async function loadDropboxScripts(): Promise<void> {
   }
 
   console.log("[Dropbox] Loading dropins.js with app key:", env.dropbox.appKey ? `SET (${env.dropbox.appKey.slice(0, 4)}...)` : "NOT SET");
+  console.log("[Dropbox] Raw NEXT_PUBLIC_DROPBOX_APP_KEY:", process.env.NEXT_PUBLIC_DROPBOX_APP_KEY ? `SET (${String(process.env.NEXT_PUBLIC_DROPBOX_APP_KEY).slice(0, 4)}...)` : "NOT SET");
+
+  // Safety: if appKey is empty at this point, nothing will work
+  if (!env.dropbox.appKey) {
+    console.error("[Dropbox] CRITICAL: appKey is empty! data-app-key will be 'undefined'. Check Vercel env vars.");
+  }
 
   return new Promise((resolve, reject) => {
     // Check if already in DOM
@@ -112,6 +118,9 @@ export async function loadDropboxScripts(): Promise<void> {
     script.src = "https://www.dropbox.com/static/api/2/dropins.js";
     script.dataset.appKey = env.dropbox.appKey;
     script.async = true;
+
+    // Verify data-app-key was set correctly
+    console.log("[Dropbox] data-app-key set to:", script.dataset.appKey || "EMPTY");
 
     script.onload = () => {
       console.log("[Dropbox] dropins.js loaded. Dropbox global available:", Boolean(window.Dropbox));
