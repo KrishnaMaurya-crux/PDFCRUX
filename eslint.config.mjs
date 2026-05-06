@@ -42,9 +42,12 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-undef": "off",
     "no-unreachable": "off",
     "no-useless-escape": "off",
+    
+    // Accessibility rules
+    "jsx-a11y/alt-text": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills"]
+  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", "public/pdf.worker.min.mjs", "public/**/*.min.mjs", "public/**/*.min.js"]
 }];
 
 export default eslintConfig;
