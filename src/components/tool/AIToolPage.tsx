@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/accordion";
 import { useAppStore } from "@/lib/store";
 import { saveHistory } from "@/lib/history";
+import CloudStorageButtons from "@/components/tool/CloudStorageButtons";
 // Enhanced PDF Summary module
 import { summarizePDF } from "@/lib/pdf-summary-tool/index";
 import type { SummaryResult as EnhancedSummaryResult } from "@/lib/pdf-summary-tool/index";
@@ -95,7 +96,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
     title: "Summarize PDF in",
     titleAccent: "Seconds",
     description:
-      "Upload any PDF and get an instant bullet-point summary. Perfect for research papers, reports, and long documents. No sign-up required for your first 3 uses per day.",
+      "Upload any PDF and get an instant bullet-point summary. Perfect for research papers, reports, and long documents. No sign-up required, 100% free.",
     badgeText: "AI-Powered",
     badgeClass: "bg-amber-100 text-amber-800 hover:bg-amber-100 border-amber-200",
     icon: Sparkles,
@@ -132,7 +133,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
       { title: "Instant Summary", description: "Get key points in seconds, not hours.", icon: Zap },
       { title: "100% Private", description: "Your files never leave your browser.", icon: ShieldCheck },
       { title: "Smart Detection", description: "Automatically finds the most important content.", icon: Sparkles },
-      { title: "Free Plan Available", description: "3 free AI summaries per day.", icon: Clock },
+      { title: "Free to Use", description: "5 free summaries per day.", icon: Clock },
     ],
     faq: [
       {
@@ -153,7 +154,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
       {
         question: "How many summaries can I generate?",
         answer:
-          "You get 3 free AI summaries per day on the Free plan. Premium unlocks 100 AI summaries per month.",
+          "You get 5 free summaries per day. Each summary processes up to 50MB files.",
       },
       {
         question: "Can I copy or print the summary?",
@@ -172,7 +173,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
     title: "Convert PDF to",
     titleAccent: "Study Notes",
     description:
-      "Upload any PDF and get structured, easy-to-read study notes. Perfect for students, researchers, and anyone who needs organized content. No sign-up required for your first 3 uses per day.",
+      "Upload any PDF and get structured, easy-to-read study notes. Perfect for students, researchers, and anyone who needs organized content. No sign-up required, 100% free.",
     badgeText: "Study Tool",
     badgeClass: "bg-emerald-100 text-emerald-800 hover:bg-emerald-100 border-emerald-200",
     icon: BookOpen,
@@ -209,7 +210,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
       { title: "Instant Notes", description: "Structured study notes in seconds.", icon: Zap },
       { title: "100% Private", description: "Your files never leave your browser.", icon: ShieldCheck },
       { title: "Key Highlights", description: "Important points are auto-highlighted.", icon: PenTool },
-      { title: "Free Plan Available", description: "3 free generations per day.", icon: Clock },
+      { title: "Free to Use", description: "5 free generations per day.", icon: Clock },
     ],
     faq: [
       {
@@ -230,7 +231,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
       {
         question: "How many notes can I generate?",
         answer:
-          "You get 3 free generations per day on the Free plan. Premium unlocks 100 per month.",
+          "You get 5 free note generations per day. Each can process up to 50MB files.",
       },
       {
         question: "Can I copy or print the notes?",
@@ -249,7 +250,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
     title: "Check Your Resume",
     titleAccent: "ATS Score",
     description:
-      "Upload your resume and get an instant ATS compatibility score. Detailed section analysis, keyword matching, and actionable suggestions. No sign-up required for your first 3 uses per day.",
+      "Upload your resume and get an instant ATS compatibility score. Detailed section analysis, keyword matching, and actionable suggestions. No sign-up required, 100% free.",
     badgeText: "ATS Tool",
     badgeClass: "bg-blue-100 text-blue-800 hover:bg-blue-100 border-blue-200",
     icon: UserCheck,
@@ -287,7 +288,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
       { title: "Instant Analysis", description: "Get your ATS score in seconds.", icon: Zap },
       { title: "100% Private", description: "Your resume never leaves your browser.", icon: ShieldCheck },
       { title: "Detailed Report", description: "Section analysis, keyword matching, and scoring.", icon: FileSearch },
-      { title: "Free Plan Available", description: "3 free checks per day.", icon: Clock },
+      { title: "Free to Use", description: "5 free checks per day.", icon: Clock },
     ],
     faq: [
       {
@@ -313,7 +314,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
       {
         question: "Can I check multiple resumes?",
         answer:
-          "You get 3 free ATS checks per day on the Free plan. Premium unlocks 100 per month.",
+          "You get 5 free ATS checks per day. Upload and analyze different versions of your resume.",
       },
       {
         question: "How can I improve my score?",
@@ -1150,6 +1151,17 @@ export default function AIToolPage({
                   </div>
                 </div>
               )}
+
+              {/* Cloud Storage Import Buttons — ALWAYS visible */}
+              <div className="flex items-center gap-3 justify-center">
+                <span className="text-xs text-muted-foreground whitespace-nowrap">or import from</span>
+                <CloudStorageButtons
+                  mode="upload"
+                  onFilesSelected={(files) => {
+                    if (files.length > 0) handleFileSelection(files[0]);
+                  }}
+                />
+              </div>
 
               {/* File card (after upload) */}
               {file && (
