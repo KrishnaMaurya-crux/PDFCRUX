@@ -47,15 +47,12 @@ export const r2 = {
 
 // ============================================================
 // 3. GOOGLE DRIVE (Cloud Import)
-//    NEXT_PUBLIC_ prefix is REQUIRED for client-side access in Next.js
 // ============================================================
 export const googleDrive = {
-  clientId: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_DRIVE_CLIENT_ID || "",
-  apiKey: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY || process.env.GOOGLE_DRIVE_API_KEY || "",
-  appId: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID || process.env.GOOGLE_DRIVE_APP_ID || "",
+  clientId: process.env.GOOGLE_DRIVE_CLIENT_ID || "",
+  apiKey: process.env.GOOGLE_DRIVE_API_KEY || "",
+  appId: process.env.GOOGLE_DRIVE_APP_ID || "",
   clientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || "",
-  scopes:
-    "email profile openid https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata",
   get isConfigured() {
     return isSet(this.clientId) && isSet(this.apiKey);
   },
@@ -63,10 +60,9 @@ export const googleDrive = {
 
 // ============================================================
 // 4. DROPBOX (Cloud Import)
-//    NEXT_PUBLIC_ prefix is REQUIRED for client-side access in Next.js
 // ============================================================
 export const dropbox = {
-  appKey: process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || process.env.DROPBOX_APP_KEY || "",
+  appKey: process.env.DROPBOX_APP_KEY || "",
   appSecret: process.env.DROPBOX_APP_SECRET || "",
   get isConfigured() {
     return isSet(this.appKey);
@@ -124,7 +120,7 @@ export function getEnvHealth(): HealthStatus[] {
       name: "Google Drive Import",
       configured: googleDrive.isConfigured,
       details: googleDrive.isConfigured
-        ? "Client ID + API Key ready"
+        ? "Client ID + API Key ready (5 scopes: userinfo.email, userinfo.profile, openid, drive.file, drive.appdata)"
         : "Missing GOOGLE_DRIVE_CLIENT_ID or API_KEY",
     },
     {

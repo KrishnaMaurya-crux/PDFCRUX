@@ -550,7 +550,18 @@ export async function organizePDF(
         stats: { originalSize: file.size, outputSize: data.length },
       };
     } else if (mode === "reorder") {
-      if (pageIndices.length === 0) {
+      // Check for DnD page-order first (from drag-and-drop reordering)
+      const pageOrderInput = String(options["page-order"] || "");
+      let orderedIndices: number[];
+
+      if (pageOrderInput) {
+        // Parse comma-separated page numbers (e.g., "3,1,2,4") preserving order
+        orderedIndices = pageOrderInput
+          .split(",")
+          .map((s) => parseInt(s.trim(), 10))
+          .filter((n) => !isNaN(n) && n >= 1 && n <= pages.length)
+          .map((n) => n - 1); // Convert to 0-based indices
+      } else if (pageIndices.length === 0) {
         // Just return original
         const data = await pdf.save();
         return {
@@ -561,9 +572,12 @@ export async function organizePDF(
           message: "No page order specified, returning original",
           stats: { originalSize: file.size, outputSize: data.length },
         };
+      } else {
+        orderedIndices = pageIndices;
       }
+
       const newPdf = await PDFDocument.create();
-      const copiedPages = await newPdf.copyPages(pdf, pageIndices);
+      const copiedPages = await newPdf.copyPages(pdf, orderedIndices);
       copiedPages.forEach((p) => newPdf.addPage(p));
       const data = await newPdf.save();
       return {
@@ -575,7 +589,7 @@ export async function organizePDF(
             size: data.length,
           },
         ],
-        message: `Reordered ${pageIndices.length} page(s)`,
+        message: `Reordered ${orderedIndices.length} page(s)`,
         stats: { originalSize: file.size, outputSize: data.length },
       };
     } else if (mode === "insert") {
@@ -687,18 +701,56 @@ interface PageInfo {
 
 /**
  * Fast size estimation from JPEG-encoded page blobs.
+ * Uses page sampling (max 10 pages) to prevent memory crash on large PDFs.
  * Avoids building the full PDF on each binary search step.
  */
 async function estimateSizeFromJpgs(
   pageInfos: PageInfo[],
   quality: number
 ): Promise<number> {
-  const jpgBytesList = await Promise.all(
-    pageInfos.map((p) => canvasToJpgBlob(p.canvas, quality))
-  );
-  // PDF structure overhead: ~2 KB global + ~300 bytes per page
+  // Sample max 10 pages for estimation — prevents memory crash on large PDFs
+  const maxSample = 10;
+  let sampledIndices: number[];
+  if (pageInfos.length <= maxSample) {
+    sampledIndices = pageInfos.map((_, i) => i);
+  } else {
+    // Sample first, last, and evenly distributed middle pages
+    sampledIndices = [0];
+    const step = (pageInfos.length - 1) / (maxSample - 1);
+    for (let i = 1; i < maxSample - 1; i++) {
+      sampledIndices.push(Math.round(i * step));
+    }
+    sampledIndices.push(pageInfos.length - 1);
+  }
+
+  // Process sequentially to avoid memory spike from parallel JPEG encoding
+  let totalJpgSize = 0;
+  for (const idx of sampledIndices) {
+    const jpgBytes = await canvasToJpgBlob(pageInfos[idx].canvas, quality);
+    totalJpgSize += jpgBytes.length;
+  }
+
+  // Extrapolate to all pages
+  const avgPageSize = totalJpgSize / sampledIndices.length;
   const overhead = 2000 + pageInfos.length * 300;
-  return jpgBytesList.reduce((sum, b) => sum + b.length, 0) + overhead;
+  return Math.round(avgPageSize * pageInfos.length) + overhead;
+}
+
+/** Free canvas memory by zeroing dimensions (triggers GC in most browsers) */
+function freeCanvas(canvas: HTMLCanvasElement): void {
+  try {
+    canvas.width = 0;
+    canvas.height = 0;
+  } catch {
+    // Canvas may already be freed
+  }
+}
+
+/** Free all page canvases */
+function freePageInfos(pageInfos: PageInfo[]): void {
+  for (const info of pageInfos) {
+    freeCanvas(info.canvas);
+  }
 }
 
 /**
@@ -826,9 +878,9 @@ export async function compressPDF(
       // Check if target is reachable at this DPI
       if (targetSize >= sizeAtMaxQ && attempt < 4) {
         // Even at max quality, output is too small → need MORE pixels → increase DPI
-        // Size scales roughly with DPI², so use sqrt for the adjustment factor
         const ratio = targetSize / Math.max(sizeAtMaxQ, 1);
         currentDpi = Math.round(currentDpi * Math.sqrt(ratio) * 1.15);
+        freePageInfos(pageInfos);
         continue;
       }
 
@@ -836,6 +888,7 @@ export async function compressPDF(
         // Even at min quality, output is too large → need FEWER pixels → decrease DPI
         const ratio = Math.max(sizeAtMinQ, 1) / targetSize;
         currentDpi = Math.max(48, Math.round(currentDpi / Math.sqrt(ratio) / 1.15));
+        freePageInfos(pageInfos);
         continue;
       }
 
@@ -867,6 +920,7 @@ export async function compressPDF(
 
       // Build the final PDF at the optimal quality
       bestData = await buildPdfFromPages(pageInfos, bestQuality);
+      freePageInfos(pageInfos);
       break;
     }
 
@@ -874,7 +928,11 @@ export async function compressPDF(
     if (!bestData) {
       const pageInfos = await renderPages(pdfDoc, totalPages, currentDpi, colorMode);
       bestData = await buildPdfFromPages(pageInfos, bestQuality);
+      freePageInfos(pageInfos);
     }
+
+    // Cleanup pdfDoc
+    pdfDoc.destroy();
 
     const outputSize = bestData.length;
     const actualReduction = Math.max(0, (1 - outputSize / file.size) * 100);
