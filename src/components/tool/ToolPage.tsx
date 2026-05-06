@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload,
@@ -24,16 +24,25 @@ import {
   FileSpreadsheet,
   FileUp,
   Package,
+  TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { useAppStore } from "@/lib/store";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { getToolById, getCategoryForTool } from "@/lib/tools";
 import { getToolConfig } from "@/lib/tool-configs";
 import ToolOptions from "./ToolOptions";
 import LivePreview from "./LivePreview";
-import CloudStorageButtons from "./CloudStorageButtons";
 import { useToast } from "@/hooks/use-toast";
 import {
   processTool,
@@ -133,6 +142,8 @@ function DualUploadArea({
   fileInputBRef,
   onFileAInput,
   onFileBInput,
+  onDropFileA,
+  onDropFileB,
   onRemoveA,
   onRemoveB,
   acceptTypes,
@@ -146,6 +157,8 @@ function DualUploadArea({
   fileInputBRef: React.RefObject<HTMLInputElement | null>;
   onFileAInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onFileBInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onDropFileA?: (file: File) => void;
+  onDropFileB?: (file: File) => void;
   onRemoveA: () => void;
   onRemoveB: () => void;
   acceptTypes?: string;
@@ -155,24 +168,46 @@ function DualUploadArea({
   const handleDropA = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver([false, isDragOver[1]]);
-    if (e.dataTransfer.files[0]) {
-      const dt = new DataTransfer();
-      dt.items.add(e.dataTransfer.files[0]);
-      if (fileInputARef.current) {
-        fileInputARef.current.files = dt.files;
-        fileInputARef.current.dispatchEvent(new Event("change", { bubbles: true }));
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile) {
+      const check = validateFile(droppedFile);
+      if (check.valid) {
+        // Directly invoke the parent's callback — avoids synthetic event issues on mobile
+        if (onDropFileA) {
+          onDropFileA(droppedFile);
+        } else {
+          // Fallback: use input ref (original behavior)
+          const dt = new DataTransfer();
+          dt.items.add(droppedFile);
+          if (fileInputARef.current) {
+            fileInputARef.current.files = dt.files;
+            fileInputARef.current.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+      } else {
+        console.warn(`Dropped file for slot A skipped: ${check.reason}`);
       }
     }
   };
   const handleDropB = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver([isDragOver[0], false]);
-    if (e.dataTransfer.files[0]) {
-      const dt = new DataTransfer();
-      dt.items.add(e.dataTransfer.files[0]);
-      if (fileInputBRef.current) {
-        fileInputBRef.current.files = dt.files;
-        fileInputBRef.current.dispatchEvent(new Event("change", { bubbles: true }));
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile) {
+      const check = validateFile(droppedFile);
+      if (check.valid) {
+        if (onDropFileB) {
+          onDropFileB(droppedFile);
+        } else {
+          const dt = new DataTransfer();
+          dt.items.add(droppedFile);
+          if (fileInputBRef.current) {
+            fileInputBRef.current.files = dt.files;
+            fileInputBRef.current.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+      } else {
+        console.warn(`Dropped file for slot B skipped: ${check.reason}`);
       }
     }
   };
@@ -268,6 +303,22 @@ function DualUploadArea({
   );
 }
 
+/**
+ * Defensive validation for File objects before they enter upload state.
+ * Catches empty (0-byte), unnamed, or non-File entries that some mobile
+ * browsers can produce when the picker is cancelled or returns a stale ref.
+ */
+function validateFile(file: File): { valid: boolean; reason?: string } {
+  if (!file || !(file instanceof File))
+    return { valid: false, reason: "Invalid file object" };
+  if (!file.name || file.name.trim() === "")
+    return { valid: false, reason: "File has no name" };
+  if (typeof file.size !== "number" || isNaN(file.size))
+    return { valid: false, reason: "File size is invalid" };
+  if (file.size === 0) return { valid: false, reason: "File is empty (0 bytes)" };
+  return { valid: true };
+}
+
 // Main ToolPage component
 export default function ToolPage() {
   const {
@@ -284,6 +335,8 @@ export default function ToolPage() {
     setProcessingProgress,
     completeProcessing,
     resetTool,
+    selectTool,
+    openAuthDialog,
   } = useAppStore();
 
   const { toast } = useToast();
@@ -317,6 +370,10 @@ export default function ToolPage() {
     null
   );
 
+  // Task A: Large file dialog state
+  const [showLargeFileDialog, setShowLargeFileDialog] = useState(false);
+  const [largeFileName, setLargeFileName] = useState("");
+
   // For dual upload (compare)
   const [compareFileA, setCompareFileA] = useState<File | null>(null);
   const [compareFileB, setCompareFileB] = useState<File | null>(null);
@@ -325,9 +382,33 @@ export default function ToolPage() {
     false,
   ]);
 
+  // Task B: Auth gate — check if user is signed in before processing/downloading
+  const requireAuth = useCallback(async (): Promise<boolean> => {
+    // If Supabase is not configured, allow all actions (graceful degradation)
+    if (!isSupabaseConfigured) return true;
+
+    try {
+      const {
+        data: { session: currentSession },
+      } = await supabase.auth.getSession();
+      if (currentSession) return true;
+
+      // No session — show auth dialog
+      openAuthDialog();
+      return false;
+    } catch {
+      // If session check fails, allow processing (graceful degradation)
+      return true;
+    }
+  }, [openAuthDialog]);
+
   // REAL processing with actual PDF manipulation
   const handleProcess = async () => {
     if (!config || !selectedToolId) return;
+
+    // Task B: Auth gate before processing
+    const isAuthed = await requireAuth();
+    if (!isAuthed) return;
 
     // Validation
     for (const opt of config.options) {
@@ -456,11 +537,27 @@ export default function ToolPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    handleFileSelection(Array.from(e.dataTransfer.files));
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    const validDropped = droppedFiles.filter((f) => {
+      const check = validateFile(f);
+      if (!check.valid) {
+        console.warn(`Dropped file "${f.name}" skipped: ${check.reason}`);
+      }
+      return check.valid;
+    });
+    if (validDropped.length === 0 && droppedFiles.length > 0) {
+      setError(
+        "The dropped file(s) are empty or invalid. Please try again."
+      );
+      return;
+    }
+    handleFileSelection(validDropped);
   };
 
   const handleFileSelection = (files: File[]) => {
     setError(null);
+    // Determine the files that will actually be added
+    let filesToAdd: File[];
     if (tool.acceptTypes) {
       const accepted = tool.acceptTypes.split(",");
       const valid = files.filter((f) => {
@@ -477,70 +574,123 @@ export default function ToolPage() {
         setError("This tool accepts only one file at a time.");
         return;
       }
-      addFiles(valid);
-    } else {
-      addFiles(files);
-    }
-  };
-
-  // Cloud storage handlers
-  const handleCloudFilesSelected = (files: File[]) => {
-    if (files.length === 0) return;
-    handleFileSelection(files);
-    toast({
-      title: "Files imported",
-      description: `${files.length} file(s) imported from cloud storage`,
-    });
-  };
-
-  const handleCloudSave = async (provider: "google-drive" | "dropbox") => {
-    const result = processResult;
-    if (!result || !result.success || result.outputFiles.length === 0) return;
-
-    const file = result.outputFiles[0];
-    const blob = new Blob([file.data], { type: "application/pdf" });
-
-    try {
-      if (provider === "dropbox") {
-        const { saveToDropbox } = await import("@/lib/dropbox");
-        await saveToDropbox(blob, file.name);
-        toast({ title: "Saved to Dropbox!", description: file.name });
-      } else if (provider === "google-drive") {
-        const { saveToGoogleDrive, loadGoogleDriveScripts } = await import(
-          "@/lib/google-drive"
-        );
-        await loadGoogleDriveScripts();
-        toast({
-          title: "Google Drive Save",
-          description: "File will be uploaded to your Google Drive",
-        });
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Save failed";
-      toast({
-        title: "Save failed",
-        description: msg,
-        variant: "destructive",
+      // After type check, also validate file size — reject 0-byte / invalid files
+      const validAndSized = valid.filter((f) => {
+        const check = validateFile(f);
+        if (!check.valid) {
+          console.warn(
+            `File "${f.name}" passed type check but failed validation: ${check.reason}`
+          );
+        }
+        return check.valid;
       });
+      if (validAndSized.length === 0) {
+        setError(
+          "The selected file is empty (0 bytes). Please choose a valid file."
+        );
+        return;
+      }
+      filesToAdd = validAndSized;
+    } else {
+      // No acceptTypes restriction — still filter out 0-byte / invalid files
+      filesToAdd = files.filter((f) => {
+        const check = validateFile(f);
+        if (!check.valid) {
+          console.warn(`File "${f.name}" skipped: ${check.reason}`);
+        }
+        return check.valid;
+      });
+      if (filesToAdd.length === 0 && files.length > 0) {
+        setError(
+          "The selected file is empty (0 bytes). Please choose a valid file."
+        );
+        return;
+      }
+    }
+
+    addFiles(filesToAdd);
+
+    // Task A: Check for large files (>50MB) and suggest compressing first
+    const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024; // 50MB
+    const largeFile = filesToAdd.find((f) => f.size > LARGE_FILE_THRESHOLD);
+    if (largeFile && selectedToolId !== "compress-pdf") {
+      setLargeFileName(largeFile.name);
+      setShowLargeFileDialog(true);
     }
   };
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) handleFileSelection(Array.from(e.target.files));
+    if (e.target.files) {
+      const rawFiles = Array.from(e.target.files);
+      const validFiles = rawFiles.filter((f) => {
+        const check = validateFile(f);
+        if (!check.valid) {
+          console.warn(
+            `Input file "${f.name}" skipped: ${check.reason}`
+          );
+        }
+        return check.valid;
+      });
+      const skippedCount = rawFiles.length - validFiles.length;
+      if (skippedCount > 0) {
+        toast({
+          title: "Some files were skipped",
+          description: `${skippedCount} file(s) were empty or invalid and could not be uploaded.`,
+          variant: "destructive",
+        });
+      }
+      if (validFiles.length > 0) {
+        handleFileSelection(validFiles);
+      } else if (skippedCount > 0) {
+        setError(
+          "The selected file is empty (0 bytes). Please choose a valid file."
+        );
+      }
+    }
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleCompareFileA = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setCompareFileA(e.target.files[0]);
+      const file = e.target.files[0];
+      const check = validateFile(file);
+      if (!check.valid) {
+        console.warn(`Compare File A skipped: ${check.reason}`);
+        setError(
+        "The selected file is empty (0 bytes). Please choose a valid file."
+      );
+      return;
+      }
+      setCompareFileA(file);
       setError(null);
+      // Task A: Large file check for compare uploads
+      const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
+      if (file.size > LARGE_FILE_THRESHOLD && selectedToolId !== "compress-pdf") {
+        setLargeFileName(file.name);
+        setShowLargeFileDialog(true);
+      }
     }
   };
 
   const handleCompareFileB = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setCompareFileB(e.target.files[0]);
+      const file = e.target.files[0];
+      const check = validateFile(file);
+      if (!check.valid) {
+        console.warn(`Compare File B skipped: ${check.reason}`);
+        setError(
+        "The selected file is empty (0 bytes). Please choose a valid file."
+      );
+      return;
+      }
+      setCompareFileB(file);
       setError(null);
+      // Task A: Large file check for compare uploads
+      const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
+      if (file.size > LARGE_FILE_THRESHOLD && selectedToolId !== "compress-pdf") {
+        setLargeFileName(file.name);
+        setShowLargeFileDialog(true);
+      }
     }
   };
 
@@ -616,7 +766,7 @@ export default function ToolPage() {
   };
 
   // Handle real file download
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const result = processResult;
     if (!result || !result.success || result.outputFiles.length === 0) {
       toast({
@@ -626,6 +776,10 @@ export default function ToolPage() {
       });
       return;
     }
+
+    // Task B: Auth gate before download
+    const isAuthed = await requireAuth();
+    if (!isAuthed) return;
 
     if (result.outputFiles.length === 1) {
       // Single file - download directly
@@ -748,6 +902,16 @@ export default function ToolPage() {
                   fileInputBRef={fileInputBRef}
                   onFileAInput={handleCompareFileA}
                   onFileBInput={handleCompareFileB}
+                  onDropFileA={(file) => {
+                    const check = validateFile(file);
+                    if (check.valid) { setCompareFileA(file); setError(null); }
+                    else { console.warn(`Compare File A drop skipped: ${check.reason}`); setError("The dropped file is empty or invalid. Please try again."); }
+                  }}
+                  onDropFileB={(file) => {
+                    const check = validateFile(file);
+                    if (check.valid) { setCompareFileB(file); setError(null); }
+                    else { console.warn(`Compare File B drop skipped: ${check.reason}`); setError("The dropped file is empty or invalid. Please try again."); }
+                  }}
                   onRemoveA={() => setCompareFileA(null)}
                   onRemoveB={() => setCompareFileB(null)}
                   acceptTypes={tool.acceptTypes}
@@ -804,18 +968,6 @@ export default function ToolPage() {
                       </div>
                     </div>
                   )}
-
-                  {/* Cloud Storage Import Buttons */}
-                  <div className="flex items-center gap-4 justify-center mt-4">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground">or import from</span>
-                    </div>
-                    <CloudStorageButtons
-                      mode="upload"
-                      onFilesSelected={handleCloudFilesSelected}
-                      acceptTypes={tool.acceptTypes}
-                    />
-                  </div>
 
                   {/* MERGE: reorderable file list */}
                   {selectedToolId === "merge-pdf" && uploadedFiles.length > 0 && (
@@ -922,6 +1074,14 @@ export default function ToolPage() {
                   optionValues={optionValues}
                   compareFileA={compareFileA}
                   compareFileB={compareFileB}
+                  onPageOrderChange={(order) => {
+                    // Store the reordered page numbers as a comma-separated string
+                    // so the PDF processor can apply the new order
+                    setOptionValues((prev) => ({
+                      ...prev,
+                      "page-order": order.join(","),
+                    }));
+                  }}
                 />
               )}
 
@@ -1121,19 +1281,6 @@ export default function ToolPage() {
                 </Button>
               </div>
 
-              {/* Cloud Storage Save Buttons */}
-              {processResult?.success && processResult.outputFiles.length === 1 && (
-                <div className="flex items-center gap-4 justify-center mt-4">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">or save to</span>
-                  </div>
-                  <CloudStorageButtons
-                    mode="download"
-                    onCloudSave={handleCloudSave}
-                  />
-                </div>
-              )}
-
               {/* Output files list for multiple files */}
               {processResult?.success &&
                 processResult.outputFiles.length > 1 && (
@@ -1201,6 +1348,46 @@ export default function ToolPage() {
           )}
         </AnimatePresence>
       </div>
+
+      {/* Task A: Large File Compress Suggestion Dialog */}
+      <Dialog open={showLargeFileDialog} onOpenChange={setShowLargeFileDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <TriangleAlert className="w-5 h-5 text-amber-500" />
+              Large File Detected
+            </DialogTitle>
+            <DialogDescription>
+              <span className="font-medium">{largeFileName}</span> is over 50MB.
+              Processing may be slow and could affect performance.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+            <p className="text-sm text-amber-800 dark:text-amber-200">
+              We recommend compressing large PDFs first to improve processing
+              speed and reliability.
+            </p>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setShowLargeFileDialog(false)}
+            >
+              Continue Anyway
+            </Button>
+            <Button
+              onClick={() => {
+                setShowLargeFileDialog(false);
+                selectTool("compress-pdf");
+              }}
+              className="gap-2"
+            >
+              <FileText className="w-4 h-4" />
+              Compress First
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
