@@ -79,14 +79,10 @@ declare global {
 // ============================================================
 // Script Loading (idempotent)
 // ============================================================
-let dropinsLoaded = false;
+// Track the key that was last injected — if key changes, force reload
+let lastInjectedKey: string | null = null;
 
 export async function loadDropboxScripts(): Promise<void> {
-  if (dropinsLoaded && window.Dropbox) {
-    console.log("[Dropbox] Scripts already loaded, skipping.");
-    return;
-  }
-
   // ── DIRECT process.env access — no intermediate variable ──
   const dropboxKey = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY;
 
@@ -94,42 +90,49 @@ export async function loadDropboxScripts(): Promise<void> {
     console.error(
       "[Dropbox] CRITICAL: NEXT_PUBLIC_DROPBOX_APP_KEY is not set. " +
       "The data-app-key attribute will be empty. " +
-      "Fix: Add NEXT_PUBLIC_DROPBOX_APP_KEY=rpd6g5dfra7j069 to your Vercel env vars."
+      "Fix: Set NEXT_PUBLIC_DROPBOX_APP_KEY in your .env or Vercel env vars."
     );
     throw new Error("Dropbox is not configured. Missing NEXT_PUBLIC_DROPBOX_APP_KEY.");
   }
 
-  console.log("INJECTING KEY:", process.env.NEXT_PUBLIC_DROPBOX_APP_KEY);
+  console.log("INJECTING KEY:", dropboxKey);
   console.log("[Dropbox] App key:", dropboxKey.slice(0, 4) + "..." + dropboxKey.slice(-4));
 
-  return new Promise((resolve, reject) => {
-    // Check if already in DOM
-    const existing = document.getElementById("dropbox-dropins-js");
-    if (existing && window.Dropbox) {
-      console.log("[Dropbox] Script already in DOM and Dropbox global available.");
-      dropinsLoaded = true;
-      resolve();
-      return;
-    }
-    if (existing) {
-      existing.remove();
-    }
+  // Already loaded with the SAME key? Skip.
+  if (lastInjectedKey === dropboxKey && window.Dropbox) {
+    console.log("[Dropbox] Scripts already loaded with same key, skipping.");
+    return;
+  }
 
+  // KEY CHANGED or never loaded — force reload
+  if (lastInjectedKey && lastInjectedKey !== dropboxKey) {
+    console.log("[Dropbox] ⚠️ Key changed! Old:", lastInjectedKey.slice(0, 4) + "..., New:", dropboxKey.slice(0, 4) + "... — Force reloading script.");
+  }
+
+  // Remove any existing script (old key or stale)
+  const existing = document.getElementById("dropbox-dropins-js");
+  if (existing) {
+    existing.remove();
+    console.log("[Dropbox] Removed existing dropins.js script from DOM.");
+  }
+  // Reset the global so we don't use stale Dropbox object
+  delete (window as any).Dropbox;
+
+  return new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.id = "dropbox-dropins-js";
     script.src = "https://www.dropbox.com/static/api/2/dropins.js";
     // ── FORCE setAttribute — direct process.env access ──
-    script.setAttribute("data-app-key", process.env.NEXT_PUBLIC_DROPBOX_APP_KEY!);
-    // Also set dataset for consistency
-    script.dataset.appKey = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY!;
+    script.setAttribute("data-app-key", dropboxKey);
     script.async = true;
 
     // Verify BEFORE injecting
-    console.log("[Dropbox] Injecting script with data-app-key:", script.getAttribute("data-app-key") || "EMPTY");
+    const injectedKey = script.getAttribute("data-app-key");
+    console.log("[Dropbox] Injecting script with data-app-key:", injectedKey || "EMPTY");
 
     script.onload = () => {
-      console.log("[Dropbox] dropins.js loaded. Dropbox global available:", Boolean(window.Dropbox));
-      dropinsLoaded = true;
+      console.log("[Dropbox] ✅ dropins.js loaded. Dropbox global available:", Boolean(window.Dropbox));
+      lastInjectedKey = dropboxKey;
       resolve();
     };
 
