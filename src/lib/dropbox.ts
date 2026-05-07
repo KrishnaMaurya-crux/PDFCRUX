@@ -83,20 +83,23 @@ declare global {
 let lastInjectedKey: string | null = null;
 
 export async function loadDropboxScripts(): Promise<void> {
-  // ── DIRECT process.env access — no intermediate variable ──
-  const dropboxKey = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY;
+  // ── DIRECT process.env access with HARD-CODED FALLBACK ──
+  // If process.env returns undefined (Vercel sync issue), use fallback key.
+  // TODO: Remove fallback after Vercel deployment confirms key is injected.
+  const FALLBACK_KEY = "uwt8kpifw2nwe13";
+  const dropboxKey = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || FALLBACK_KEY;
+
+  // ── DEBUG ALERT: Shows detected key source on button click ──
+  const source = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY ? "process.env" : "FALLBACK";
+  window.alert("Detected Key: " + dropboxKey + "\nSource: " + source);
+  console.log("INJECTING KEY:", dropboxKey, "(source:", source, ")");
 
   if (!dropboxKey) {
     console.error(
-      "[Dropbox] CRITICAL: NEXT_PUBLIC_DROPBOX_APP_KEY is not set. " +
-      "The data-app-key attribute will be empty. " +
-      "Fix: Set NEXT_PUBLIC_DROPBOX_APP_KEY in your .env or Vercel env vars."
+      "[Dropbox] CRITICAL: No key available (not even fallback)."
     );
     throw new Error("Dropbox is not configured. Missing NEXT_PUBLIC_DROPBOX_APP_KEY.");
   }
-
-  console.log("INJECTING KEY:", dropboxKey);
-  console.log("[Dropbox] App key:", dropboxKey.slice(0, 4) + "..." + dropboxKey.slice(-4));
 
   // Already loaded with the SAME key? Skip.
   if (lastInjectedKey === dropboxKey && window.Dropbox) {
