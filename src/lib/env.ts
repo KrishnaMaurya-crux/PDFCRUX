@@ -98,7 +98,10 @@ export const googleDrive = {
 // 4. DROPBOX (Cloud Import / Save)
 // ============================================================
 export const dropbox = {
-  appKey: process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || "",
+  // ── DIRECT getter — always reads fresh from process.env, never stale ──
+  get appKey() {
+    return process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || "";
+  },
   // NOTE: appSecret removed — Chooser/Saver APIs are purely client-side.
   // Secret is NEVER needed on the frontend.
   get isConfigured() {

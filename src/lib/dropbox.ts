@@ -8,14 +8,15 @@
  * App Secret is NEVER needed — do not expose it to the browser.
  */
 
-// ── Read key DIRECTLY from process.env (inlined by Next.js at build time) ──
-// We do NOT use env.dropbox.isConfigured for the module-level check
-// because that evaluates once and can go stale.
-const DROPBOX_APP_KEY = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || "";
+// ── NO top-level constant. Use process.env.NEXT_PUBLIC_DROPBOX_APP_KEY directly.
+//    Module-level constants can go stale due to variable shadowing.
+//    Next.js inlines process.env.NEXT_PUBLIC_* at build time — so direct access
+//    is the most reliable approach.
 
-/** Runtime check — always fresh, never stale */
+/** Runtime check — always fresh, reads directly from process.env */
 export function getIsDropboxReady(): boolean {
-  return Boolean(DROPBOX_APP_KEY && DROPBOX_APP_KEY.trim().length > 0);
+  const key = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY;
+  return Boolean(key && key.trim().length > 0);
 }
 
 /**
@@ -86,8 +87,10 @@ export async function loadDropboxScripts(): Promise<void> {
     return;
   }
 
-  // ── Use the DIRECT constant, not env.dropbox.appKey ──
-  if (!DROPBOX_APP_KEY) {
+  // ── DIRECT process.env access — no intermediate variable ──
+  const dropboxKey = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY;
+
+  if (!dropboxKey) {
     console.error(
       "[Dropbox] CRITICAL: NEXT_PUBLIC_DROPBOX_APP_KEY is not set. " +
       "The data-app-key attribute will be empty. " +
@@ -96,7 +99,8 @@ export async function loadDropboxScripts(): Promise<void> {
     throw new Error("Dropbox is not configured. Missing NEXT_PUBLIC_DROPBOX_APP_KEY.");
   }
 
-  console.log("[Dropbox] App key:", DROPBOX_APP_KEY.slice(0, 4) + "..." + DROPBOX_APP_KEY.slice(-4));
+  console.log("INJECTING KEY:", process.env.NEXT_PUBLIC_DROPBOX_APP_KEY);
+  console.log("[Dropbox] App key:", dropboxKey.slice(0, 4) + "..." + dropboxKey.slice(-4));
 
   return new Promise((resolve, reject) => {
     // Check if already in DOM
@@ -114,8 +118,10 @@ export async function loadDropboxScripts(): Promise<void> {
     const script = document.createElement("script");
     script.id = "dropbox-dropins-js";
     script.src = "https://www.dropbox.com/static/api/2/dropins.js";
-    // ── Use the DIRECT constant ──
-    script.dataset.appKey = DROPBOX_APP_KEY;
+    // ── FORCE setAttribute — direct process.env access ──
+    script.setAttribute("data-app-key", process.env.NEXT_PUBLIC_DROPBOX_APP_KEY!);
+    // Also set dataset for consistency
+    script.dataset.appKey = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY!;
     script.async = true;
 
     // Verify BEFORE injecting
