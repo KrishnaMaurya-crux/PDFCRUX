@@ -80,7 +80,8 @@ export const googleDrive = {
   clientId: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID || "",
   apiKey: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY || "",
   appId: process.env.NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID || "",
-  clientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || "",
+  // NOTE: clientSecret is server-only (no NEXT_PUBLIC_ prefix).
+  // GIS + Picker operate entirely client-side without it.
   scopes:
     "email profile openid https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata",
   get isConfigured() {
@@ -98,7 +99,8 @@ export const googleDrive = {
 // ============================================================
 export const dropbox = {
   appKey: process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || "",
-  appSecret: process.env.DROPBOX_APP_SECRET || "",
+  // NOTE: appSecret removed — Chooser/Saver APIs are purely client-side.
+  // Secret is NEVER needed on the frontend.
   get isConfigured() {
     const ok = isSet(this.appKey);
     if (!ok) {

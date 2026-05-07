@@ -4,26 +4,27 @@
  * Uses Dropbox Chooser API (client-side) + Saver API (client-side)
  * Requires: NEXT_PUBLIC_DROPBOX_APP_KEY
  *
- * Flow (Import / pickFromDropbox):
- * 1. Load dropins.js script with data-app-key
- * 2. Open Chooser
- * 3. User selects file(s)
- * 4. Download selected files via direct links (?dl=1)
- * 5. Return File[] to caller
- *
- * Flow (Save / saveToDropbox):
- * 1. Create blob URL from file data
- * 2. Open Saver with blob URL
- * 3. Revoke blob URL in finally
+ * SECURITY: Chooser/Saver APIs are CLIENT-SIDE ONLY.
+ * App Secret is NEVER needed — do not expose it to the browser.
  */
 
-import { env } from "@/lib/env";
+// ── Read key DIRECTLY from process.env (inlined by Next.js at build time) ──
+// We do NOT use env.dropbox.isConfigured for the module-level check
+// because that evaluates once and can go stale.
+const DROPBOX_APP_KEY = process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || "";
 
-// ============================================================
-// Exports computed at module level
-// ============================================================
-export const isDropboxReady = env.dropbox.isConfigured;
-export const dropboxAppKey = env.dropbox.appKey;
+/** Runtime check — always fresh, never stale */
+export function getIsDropboxReady(): boolean {
+  return Boolean(DROPBOX_APP_KEY && DROPBOX_APP_KEY.trim().length > 0);
+}
+
+/**
+ * @deprecated Use getIsDropboxReady() instead — this is a stale module-level constant.
+ * Kept for backward compatibility with existing imports.
+ */
+export const isDropboxReady = getIsDropboxReady();
+
+// ── NOTE: dropboxAppKey export REMOVED — do not leak secrets to client bundle ──
 
 // ============================================================
 // TypeScript interfaces for Dropbox Drop-ins
@@ -85,20 +86,17 @@ export async function loadDropboxScripts(): Promise<void> {
     return;
   }
 
-  if (!env.dropbox.isConfigured) {
-    console.warn(
-      `[Dropbox] Not configured — missing app key. (Key present: ${Boolean(env.dropbox.appKey)})`
+  // ── Use the DIRECT constant, not env.dropbox.appKey ──
+  if (!DROPBOX_APP_KEY) {
+    console.error(
+      "[Dropbox] CRITICAL: NEXT_PUBLIC_DROPBOX_APP_KEY is not set. " +
+      "The data-app-key attribute will be empty. " +
+      "Fix: Add NEXT_PUBLIC_DROPBOX_APP_KEY=rpd6g5dfra7j069 to your Vercel env vars."
     );
-    throw new Error("Dropbox is not configured. Missing app key.");
+    throw new Error("Dropbox is not configured. Missing NEXT_PUBLIC_DROPBOX_APP_KEY.");
   }
 
-  console.log("[Dropbox] Loading dropins.js with app key:", env.dropbox.appKey ? `SET (${env.dropbox.appKey.slice(0, 4)}...)` : "NOT SET");
-  console.log("[Dropbox] Raw NEXT_PUBLIC_DROPBOX_APP_KEY:", process.env.NEXT_PUBLIC_DROPBOX_APP_KEY ? `SET (${String(process.env.NEXT_PUBLIC_DROPBOX_APP_KEY).slice(0, 4)}...)` : "NOT SET");
-
-  // Safety: if appKey is empty at this point, nothing will work
-  if (!env.dropbox.appKey) {
-    console.error("[Dropbox] CRITICAL: appKey is empty! data-app-key will be 'undefined'. Check Vercel env vars.");
-  }
+  console.log("[Dropbox] App key:", DROPBOX_APP_KEY.slice(0, 4) + "..." + DROPBOX_APP_KEY.slice(-4));
 
   return new Promise((resolve, reject) => {
     // Check if already in DOM
@@ -116,11 +114,12 @@ export async function loadDropboxScripts(): Promise<void> {
     const script = document.createElement("script");
     script.id = "dropbox-dropins-js";
     script.src = "https://www.dropbox.com/static/api/2/dropins.js";
-    script.dataset.appKey = env.dropbox.appKey;
+    // ── Use the DIRECT constant ──
+    script.dataset.appKey = DROPBOX_APP_KEY;
     script.async = true;
 
-    // Verify data-app-key was set correctly
-    console.log("[Dropbox] data-app-key set to:", script.dataset.appKey || "EMPTY");
+    // Verify BEFORE injecting
+    console.log("[Dropbox] Injecting script with data-app-key:", script.getAttribute("data-app-key") || "EMPTY");
 
     script.onload = () => {
       console.log("[Dropbox] dropins.js loaded. Dropbox global available:", Boolean(window.Dropbox));
@@ -198,7 +197,8 @@ export async function pickFromDropbox(
         console.log(`[Dropbox] Chooser returned ${files.length} file(s)`);
 
         if (files.length === 0) {
-          reject(new Error("No files selected from Dropbox"));
+          // User opened chooser but selected nothing — treat as cancel
+          resolve([]);
           return;
         }
 
@@ -218,7 +218,8 @@ export async function pickFromDropbox(
             return;
           }
 
-          console.log(`[Dropbox] Successfully imported ${validFiles.length} file(s)`);
+          console.log(`[Dropbox] Successfully imported ${validFiles.length} file(s):`,
+            validFiles.map((f) => `${f.name} (${f.size}B)`));
           resolve(validFiles);
         } catch (err) {
           console.error("[Dropbox] Download failed:", err);
@@ -227,7 +228,8 @@ export async function pickFromDropbox(
       },
       cancel: () => {
         console.log("[Dropbox] Chooser cancelled by user");
-        reject(new Error("Dropbox selection cancelled"));
+        // RESOLVE with empty array — not reject. No error toast needed.
+        resolve([]);
       },
       error: (error?: string) => {
         console.error("[Dropbox] Chooser error:", error);
@@ -277,7 +279,8 @@ export async function saveToDropbox(
         },
         cancel: () => {
           console.log("[Dropbox] Saver cancelled by user");
-          reject(new Error("Dropbox save cancelled"));
+          // Resolve silently — user chose not to save, not an error
+          resolve();
         },
         error: (error?: string) => {
           console.error("[Dropbox] Saver error:", error);
