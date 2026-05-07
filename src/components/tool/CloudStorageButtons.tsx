@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
-import { pickFromGoogleDrive, isGoogleDriveReady } from "@/lib/google-drive";
-import { pickFromDropbox, isDropboxReady } from "@/lib/dropbox";
+import { pickFromGoogleDrive } from "@/lib/google-drive";
+import { getIsGoogleDriveReady } from "@/lib/google-drive";
+import { pickFromDropbox } from "@/lib/dropbox";
+import { getIsDropboxReady } from "@/lib/dropbox";
 import { useToast } from "@/hooks/use-toast";
 
 interface CloudStorageButtonsProps {
@@ -53,61 +55,128 @@ export default function CloudStorageButtons({
   const [loading, setLoading] = useState<"google-drive" | "dropbox" | null>(null);
   const { toast } = useToast();
 
+  // ── Google Drive handler ──
   const handleGoogleDrive = async () => {
     if (loading) return;
 
+    // Download mode: delegate to parent
     if (mode === "download") {
       onCloudSave?.("google-drive");
       return;
     }
 
-    if (!isGoogleDriveReady) {
-      toast({ title: "Google Drive not configured", description: "Set NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID and API_KEY in environment.", variant: "destructive" });
+    // Runtime config check (NOT stale module-level constant)
+    if (!getIsGoogleDriveReady()) {
+      toast({
+        title: "Google Drive not configured",
+        description: "Set NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID and API_KEY in Vercel env vars.",
+        variant: "destructive",
+      });
       return;
     }
 
     setLoading("google-drive");
     try {
+      console.log("[CloudButtons] Calling pickFromGoogleDrive...");
       const files = await pickFromGoogleDrive();
+      console.log("[CloudButtons] pickFromGoogleDrive returned:", files.length, "files");
+
+      if (files.length === 0) {
+        // Cancelled or no files — silently ignore
+        console.log("[CloudButtons] No files returned (user cancelled or no selection).");
+        return;
+      }
+
       const valid = files.filter(isValidFile);
-      if (valid.length > 0) onFilesSelected?.(valid);
-      if (valid.length === 0 && files.length > 0) toast({ title: "No valid files", description: "Selected files were empty or invalid.", variant: "destructive" });
+      console.log("[CloudButtons] Valid files:", valid.length);
+
+      if (valid.length > 0) {
+        console.log("[CloudButtons] Calling onFilesSelected with:", valid.map((f) => f.name));
+        onFilesSelected?.(valid);
+      } else {
+        toast({
+          title: "No valid files",
+          description: "Selected files were empty or invalid.",
+          variant: "destructive",
+        });
+      }
     } catch (err) {
+      console.error("[CloudButtons] Google Drive error:", err);
       const msg = err instanceof Error ? err.message : "Failed to import from Google Drive";
-      if (!msg.toLowerCase().includes("cancel")) toast({ title: "Google Drive error", description: msg, variant: "destructive" });
+      // Don't show toast for cancel/timeout
+      if (
+        !msg.toLowerCase().includes("cancel") &&
+        !msg.toLowerCase().includes("timed out")
+      ) {
+        toast({ title: "Google Drive error", description: msg, variant: "destructive" });
+      }
     } finally {
+      console.log("[CloudButtons] Resetting Google Drive loading state.");
       setLoading(null);
     }
   };
 
+  // ── Dropbox handler ──
   const handleDropbox = async () => {
     if (loading) return;
 
+    // Download mode: delegate to parent
     if (mode === "download") {
       onCloudSave?.("dropbox");
       return;
     }
 
-    if (!isDropboxReady) {
-      toast({ title: "Dropbox not configured", description: "Set NEXT_PUBLIC_DROPBOX_APP_KEY in environment.", variant: "destructive" });
+    // Runtime config check (NOT stale module-level constant)
+    if (!getIsDropboxReady()) {
+      toast({
+        title: "Dropbox not configured",
+        description: "Set NEXT_PUBLIC_DROPBOX_APP_KEY in Vercel env vars.",
+        variant: "destructive",
+      });
       return;
     }
 
     setLoading("dropbox");
     try {
+      console.log("[CloudButtons] Calling pickFromDropbox...");
       const files = await pickFromDropbox();
+      console.log("[CloudButtons] pickFromDropbox returned:", files.length, "files");
+
+      if (files.length === 0) {
+        console.log("[CloudButtons] No files returned (user cancelled or no selection).");
+        return;
+      }
+
       const valid = files.filter(isValidFile);
-      if (valid.length > 0) onFilesSelected?.(valid);
-      if (valid.length === 0 && files.length > 0) toast({ title: "No valid files", description: "Selected files were empty or invalid.", variant: "destructive" });
+      console.log("[CloudButtons] Valid files:", valid.length);
+
+      if (valid.length > 0) {
+        console.log("[CloudButtons] Calling onFilesSelected with:", valid.map((f) => f.name));
+        onFilesSelected?.(valid);
+      } else {
+        toast({
+          title: "No valid files",
+          description: "Selected files were empty or invalid.",
+          variant: "destructive",
+        });
+      }
     } catch (err) {
+      console.error("[CloudButtons] Dropbox error:", err);
       const msg = err instanceof Error ? err.message : "Failed to import from Dropbox";
-      if (!msg.toLowerCase().includes("cancel")) toast({ title: "Dropbox error", description: msg, variant: "destructive" });
+      if (
+        !msg.toLowerCase().includes("cancel") &&
+        !msg.toLowerCase().includes("timed out")
+      ) {
+        toast({ title: "Dropbox error", description: msg, variant: "destructive" });
+      }
     } finally {
+      console.log("[CloudButtons] Resetting Dropbox loading state.");
       setLoading(null);
     }
   };
 
-  const btnBase = "flex-shrink-0 w-14 h-14 rounded-full bg-white dark:bg-card border-2 border-border shadow-md hover:shadow-xl hover:scale-110 transition-all duration-200 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100";
+  const btnBase =
+    "flex-shrink-0 w-14 h-14 rounded-full bg-white dark:bg-card border-2 border-border shadow-md hover:shadow-xl hover:scale-110 transition-all duration-200 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100";
 
   return (
     <div className="flex items-center gap-4">
@@ -119,7 +188,11 @@ export default function CloudStorageButtons({
         title={mode === "download" ? "Save to Google Drive" : "Import from Google Drive"}
         className={`${btnBase} hover:border-blue-300 hover:shadow-blue-200/50`}
       >
-        {loading === "google-drive" ? <Loader2 className="w-7 h-7 animate-spin text-blue-500" /> : <GoogleDriveLogo />}
+        {loading === "google-drive" ? (
+          <Loader2 className="w-7 h-7 animate-spin text-blue-500" />
+        ) : (
+          <GoogleDriveLogo />
+        )}
       </button>
 
       {/* Dropbox — ALWAYS visible */}
@@ -130,7 +203,11 @@ export default function CloudStorageButtons({
         title={mode === "download" ? "Save to Dropbox" : "Import from Dropbox"}
         className={`${btnBase} hover:border-[#0061FF] hover:shadow-blue-200/50`}
       >
-        {loading === "dropbox" ? <Loader2 className="w-7 h-7 animate-spin text-[#0061FF]" /> : <DropboxLogo />}
+        {loading === "dropbox" ? (
+          <Loader2 className="w-7 h-7 animate-spin text-[#0061FF]" />
+        ) : (
+          <DropboxLogo />
+        )}
       </button>
     </div>
   );
