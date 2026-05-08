@@ -165,9 +165,9 @@ export async function deleteSession(id: string): Promise<void> {
 export async function cleanupExpiredSessions(): Promise<void> {
   const cutoff = Date.now() - SESSION_TTL_MS;
 
-  await openDB().then(
+  await openDB().then<void>(
     (db) =>
-      new Promise((resolve, reject) => {
+      new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
         const store = tx.objectStore(STORE_NAME);
         const request = store.openCursor();

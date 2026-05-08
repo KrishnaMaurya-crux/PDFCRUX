@@ -1746,6 +1746,8 @@ export async function comparePDFs(
   options: Record<string, string | number | boolean>
 ): Promise<ProcessResult> {
   try {
+    const bytesA = new Uint8Array(await fileA.arrayBuffer());
+    const bytesB = new Uint8Array(await fileB.arrayBuffer());
     const compareMode = String(options["compare-mode"] || "visual");
     const highlightStyle = String(options["highlight-color"] || "standard");
 
@@ -1788,7 +1790,7 @@ export async function comparePDFs(
     const fontMono = await report.embedFont(StandardFonts.Courier);
     const pw = 612; const ph = 792;
 
-    const pages: typeof report.getPages extends () => infer R ? R[number] : never = [];
+    const pages: ReturnType<typeof report.addPage>[] = [];
     let curPage = report.addPage([pw, ph]);
     pages.push(curPage);
     let y = ph - 50;
@@ -1869,8 +1871,10 @@ export async function comparePDFs(
               renderPageThumb(pdfDocA, p + 1, halfW, 220),
               renderPageThumb(pdfDocB, p + 1, halfW, 220),
             ]);
-            const jA = new Uint8Array(await canvasToBlob(cA, 0.7).arrayBuffer());
-            const jB = new Uint8Array(await canvasToBlob(cB, 0.7).arrayBuffer());
+            const bA = await canvasToBlob(cA, 0.7);
+            const bB = await canvasToBlob(cB, 0.7);
+            const jA = new Uint8Array(await bA.arrayBuffer());
+            const jB = new Uint8Array(await bB.arrayBuffer());
             const imgA = await report.embedJpg(jA);
             const imgB = await report.embedJpg(jB);
             const hA = Math.min(cA.height * halfW / cA.width, 220);
@@ -1885,7 +1889,8 @@ export async function comparePDFs(
             y -= (Math.max(hA, hB) + 28);
           } else if (hasA) {
             const cA = await renderPageThumb(pdfDocA, p + 1, halfW, 200);
-            const jA = new Uint8Array(await canvasToBlob(cA, 0.7).arrayBuffer());
+            const bA = await canvasToBlob(cA, 0.7);
+            const jA = new Uint8Array(await bA.arrayBuffer());
             const imgA = await report.embedJpg(jA);
             const hA = Math.min(cA.height * halfW / cA.width, 200);
             curPage.drawImage(imgA, { x: 50, y: y - hA, width: halfW, height: hA });
@@ -1893,7 +1898,8 @@ export async function comparePDFs(
             y -= (hA + 28);
           } else {
             const cB = await renderPageThumb(pdfDocB, p + 1, halfW, 200);
-            const jB = new Uint8Array(await canvasToBlob(cB, 0.7).arrayBuffer());
+            const bB = await canvasToBlob(cB, 0.7);
+            const jB = new Uint8Array(await bB.arrayBuffer());
             const imgB = await report.embedJpg(jB);
             const hB = Math.min(cB.height * halfW / cB.width, 200);
             curPage.drawImage(imgB, { x: 70 + halfW, y: y - hB, width: halfW, height: hB });
@@ -2070,7 +2076,7 @@ export async function convertToPDFA(
       "1a": "PDF/A-1a", "2a": "PDF/A-2a", "3a": "PDF/A-3a",
     };
     newPdf.setSubject(`Converted to ${levelMap[compliance] || "PDF/A-2b"} standard`);
-    newPdf.setKeywords(["PDF/A", compliance, "PdfCrux"].join(", "));
+    newPdf.setKeywords(["PDF/A", compliance, "PdfCrux"]);
 
     for (let i = 1; i <= totalPages; i++) {
       const page = await pdfDoc.getPage(i);
@@ -2234,13 +2240,13 @@ export async function imageToPDF(
 // For real encryption, server-side processing would be needed.
 // ========================
 
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
+function base64ToArrayBuffer(base64: string): Uint8Array {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
-  return bytes.buffer;
+  return bytes;
 }
 
 export async function protectPDF(
@@ -2513,12 +2519,13 @@ export async function editPDF(
           x: linkX, y: linkY,
           size: linkFontSize, font,
           color: rgb(linkRgb.r, linkRgb.g, linkRgb.b),
-          underline: true,
         });
-        page.addHttpLink({
-          url: url.startsWith("http") ? url : `https://${url}`,
-          x: linkX, y: linkY - 2,
-          width: textW, height: linkFontSize + 4,
+        // Underline manually since pdf-lib doesn't have underline option
+        page.drawLine({
+          start: { x: linkX, y: linkY - 2 },
+          end: { x: linkX + textW, y: linkY - 2 },
+          thickness: 0.5,
+          color: rgb(linkRgb.r, linkRgb.g, linkRgb.b),
         });
       }
 
@@ -3510,7 +3517,7 @@ export async function officeToPDF(
 
     const maxLineWidth = baseW - margin * 2;
 
-    function addPage(): typeof currentPage {
+    function addPage() {
       const p = pdf.addPage([baseW, baseH]);
       return p;
     }
@@ -3726,8 +3733,9 @@ export async function officeToPDF(
 // Download Helpers
 // ========================
 
-export function downloadBlob(data: Uint8Array, filename: string) {
-  const blob = new Blob([data], { type: "application/octet-stream" });
+export function downloadBlob(data: Uint8Array | ArrayBuffer, filename: string) {
+  const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+  const blob = new Blob([uint8], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -3852,9 +3860,12 @@ export async function processTool(
         // Converter returns Blob data; convert to Uint8Array
         const outputFiles = await Promise.all(
           result.files.map(async (f) => {
-            const data = f.data instanceof Blob
-              ? new Uint8Array(await f.data.arrayBuffer())
-              : (f.data instanceof Uint8Array ? f.data : new Uint8Array());
+            let data: Uint8Array;
+            if (f.data instanceof Blob) {
+              data = new Uint8Array(await f.data.arrayBuffer());
+            } else {
+              data = f.data as Uint8Array;
+            }
             return { name: f.name, data, size: f.size };
           })
         );

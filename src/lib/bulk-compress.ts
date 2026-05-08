@@ -48,7 +48,7 @@ export async function compressSingleFile(
   compressionLevel: string,
   colorMode: string,
 ): Promise<ProcessResult> {
-  const file = new File([buffer], fileName, { type: "application/pdf" });
+  const file = new File([new Uint8Array(buffer)], fileName, { type: "application/pdf" });
   return compressPDF(file, {
     "compression-level": compressionLevel,
     "color-mode": colorMode,
@@ -56,7 +56,7 @@ export async function compressSingleFile(
 }
 
 /**
- * Process a single batch of files sequentially (one at a time) to prevent memory crash.
+ * Process a single batch of files concurrently.
  */
 async function processBatch(
   files: { data: Uint8Array; name: string }[],
@@ -65,68 +65,62 @@ async function processBatch(
   callbacks: BulkCompressCallbacks,
   signal: AbortSignal,
 ): Promise<ProcessResult[]> {
-  const results: ProcessResult[] = [];
-  for (let i = 0; i < files.length; i++) {
-    const idx = startIdx + i;
-
-    if (signal.aborted) {
-      results.push({
-        success: false,
-        outputFiles: [],
-        message: "Aborted",
-      } satisfies ProcessResult);
-      continue;
-    }
-
-    callbacks.onFileStart?.(idx, files[i].name);
-    callbacks.onFileProgress?.(idx, files[i].name, 10);
-
-    try {
-      callbacks.onFileProgress?.(idx, files[i].name, 30);
-
-      const result = await compressSingleFile(
-        files[i].data,
-        files[i].name,
-        options.compressionLevel,
-        options.colorMode,
-      );
+  return Promise.all(
+    files.map(async (file, i) => {
+      const idx = startIdx + i;
 
       if (signal.aborted) {
-        results.push({
+        return {
           success: false,
           outputFiles: [],
           message: "Aborted",
-        } satisfies ProcessResult);
-        continue;
+        } satisfies ProcessResult;
       }
 
-      callbacks.onFileProgress?.(idx, files[i].name, 90);
+      callbacks.onFileStart?.(idx, file.name);
+      callbacks.onFileProgress?.(idx, file.name, 10);
 
-      if (result.success) {
-        callbacks.onFileComplete?.(idx, files[i].name, result);
-      } else {
-        callbacks.onFileError?.(idx, files[i].name, result.message);
+      try {
+        // Simulate initial progress
+        callbacks.onFileProgress?.(idx, file.name, 30);
+
+        const result = await compressSingleFile(
+          file.data,
+          file.name,
+          options.compressionLevel,
+          options.colorMode,
+        );
+
+        if (signal.aborted) {
+          return {
+            success: false,
+            outputFiles: [],
+            message: "Aborted",
+          } satisfies ProcessResult;
+        }
+
+        callbacks.onFileProgress?.(idx, file.name, 90);
+
+        if (result.success) {
+          callbacks.onFileComplete?.(idx, file.name, result);
+        } else {
+          callbacks.onFileError?.(idx, file.name, result.message);
+        }
+
+        callbacks.onFileProgress?.(idx, file.name, 100);
+        return result;
+      } catch (err) {
+        const errorMessage =
+          err instanceof Error ? err.message : "Unknown error";
+        callbacks.onFileError?.(idx, file.name, errorMessage);
+        return {
+          success: false,
+          outputFiles: [],
+          message: errorMessage,
+        } satisfies ProcessResult;
       }
-
-      callbacks.onFileProgress?.(idx, files[i].name, 100);
-      results.push(result);
-    } catch (err) {
-      const errorMessage =
-        err instanceof Error ? err.message : "Unknown error";
-      callbacks.onFileError?.(idx, files[i].name, errorMessage);
-      results.push({
-        success: false,
-        outputFiles: [],
-        message: errorMessage,
-      } satisfies ProcessResult);
-    }
-
-    // Yield between files within a batch to keep UI responsive
-    if (i < files.length - 1 && !signal.aborted) {
-      await yieldToUI();
-    }
-  }
-  return results;
+    }),
+  );
 }
 
 // ========================
@@ -135,8 +129,6 @@ async function processBatch(
 
 /**
  * Run bulk compression on an array of pre-loaded file buffers.
- * NOTE: BulkCompressPDF now processes files one-at-a-time inline (no pre-loading).
- * This function is kept for backward compatibility and potential API use.
  * Processes files in batches, yielding between batches to keep the UI responsive.
  */
 export async function runBulkCompression(
