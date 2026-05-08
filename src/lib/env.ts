@@ -95,26 +95,7 @@ export const googleDrive = {
 };
 
 // ============================================================
-// 4. DROPBOX (Cloud Import / Save)
-// ============================================================
-export const dropbox = {
-  // ── DIRECT getter — always reads fresh from process.env, never stale ──
-  get appKey() {
-    return process.env.NEXT_PUBLIC_DROPBOX_APP_KEY || "";
-  },
-  // NOTE: appSecret removed — Chooser/Saver APIs are purely client-side.
-  // Secret is NEVER needed on the frontend.
-  get isConfigured() {
-    const ok = isSet(this.appKey);
-    if (!ok) {
-      warnOnce("NEXT_PUBLIC_DROPBOX_APP_KEY", "Dropbox App Key");
-    }
-    return ok;
-  },
-};
-
-// ============================================================
-// 5. DODO PAYMENTS (Universal Gateway — India + Global)
+// 4. DODO PAYMENTS (Universal Gateway — India + Global)
 // ============================================================
 export const dodoPayments = {
   apiKey: process.env.DODO_API_KEY || "",
@@ -169,13 +150,6 @@ export function getEnvHealth(): HealthStatus[] {
         : "Missing NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID or API_KEY",
     },
     {
-      name: "Dropbox Import",
-      configured: dropbox.isConfigured,
-      details: dropbox.isConfigured
-        ? "App key ready (Chooser API)"
-        : "Missing NEXT_PUBLIC_DROPBOX_APP_KEY",
-    },
-    {
       name: "Dodo Payments",
       configured: dodoPayments.isConfigured,
       details: dodoPayments.isConfigured
@@ -193,7 +167,6 @@ export function getEnvDebug() {
     NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID: mask(process.env.NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID),
     NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY: mask(process.env.NEXT_PUBLIC_GOOGLE_DRIVE_API_KEY),
     NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID: mask(process.env.NEXT_PUBLIC_GOOGLE_DRIVE_APP_ID),
-    NEXT_PUBLIC_DROPBOX_APP_KEY: mask(process.env.NEXT_PUBLIC_DROPBOX_APP_KEY),
     R2_ACCOUNT_ID: mask(process.env.R2_ACCOUNT_ID),
     R2_BUCKET_NAME: process.env.R2_BUCKET_NAME || "NOT SET",
     DATABASE_URL: process.env.DATABASE_URL
@@ -207,7 +180,6 @@ export const env = {
   supabase,
   r2,
   googleDrive,
-  dropbox,
   dodoPayments,
   getEnvHealth,
   getEnvDebug,
