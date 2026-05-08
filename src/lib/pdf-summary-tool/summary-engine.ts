@@ -252,7 +252,7 @@ export function generateSummary(
   const bullets = new Set<string>();
 
   for (const para of selected) {
-    const sentences = splitSentences(para);
+    const sentences = splitSentences(para.text);
 
     // Try the first sentence as the bullet
     const firstSentence = sentences[0]?.trim() ?? "";
@@ -272,9 +272,9 @@ export function generateSummary(
       bullets.add(capped);
     } else {
       // Very short — use the whole paragraph truncated
-      const capped = para.length > 130
-        ? para.slice(0, 127).replace(/\s+\S*$/, "") + "..."
-        : para;
+      const capped = para.text.length > 130
+        ? para.text.slice(0, 127).replace(/\s+\S*$/, "") + "..."
+        : para.text;
       bullets.add(capped);
     }
   }
