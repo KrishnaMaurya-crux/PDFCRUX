@@ -11,7 +11,6 @@
 import {
   PDFDocument,
   PDFPage,
-  PageSizes,
   degrees,
   rgb,
   type PDFFont,
@@ -84,8 +83,8 @@ function resolvePageSize(
 function toPdfLibPageSize(
   pageSize: string,
   orientation: "portrait" | "landscape" | "auto",
-): PageSizes {
-  const mapping: Record<string, PageSizes> = {
+): string {
+  const mapping: Record<string, string> = {
     a4: "A4",
     letter: "LETTER",
     legal: "LEGAL",

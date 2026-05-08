@@ -212,7 +212,7 @@ export async function convertWordToPdf(
 
   // Count images extracted from mammoth messages
   const imagesExtracted = warnings.filter(
-    (m) => m.type === "info" && m.message.toLowerCase().includes("image"),
+    (m: { type: string; message: string }) => m.type === "warning" && m.message.toLowerCase().includes("image"),
   ).length;
 
   if (rawHtml.trim().length === 0) {
