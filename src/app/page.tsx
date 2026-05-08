@@ -24,12 +24,13 @@ import { useAppStore } from "@/lib/store";
 import { AnimatePresence, motion } from "framer-motion";
 
 export default function Home() {
-  const { currentView, selectedToolId } = useAppStore();
+  const { currentView, selectedToolId, isComplete } = useAppStore();
 
-  // Always scroll to top when view changes — prevents stale scroll position
+  // Always scroll to top when view changes OR processing completes
+  // — prevents result page from being scrolled to bottom
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
-  }, [currentView, selectedToolId]);
+  }, [currentView, selectedToolId, isComplete]);
 
   return (
     <div className="min-h-screen flex flex-col">

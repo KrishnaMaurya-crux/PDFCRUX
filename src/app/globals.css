@@ -123,6 +123,10 @@
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
   }
+  /* Prevent browser-level smooth scroll that can cause unwanted jumps */
+  html {
+    scroll-behavior: auto;
+  }
   /* Force bold weights on all mobile devices */
   h1, h2, h3, h4, h5, h6,
   .font-bold, .font-semibold, .font-extrabold, .font-black {
