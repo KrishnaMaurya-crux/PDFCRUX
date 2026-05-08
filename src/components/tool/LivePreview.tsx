@@ -665,6 +665,7 @@ export default function LivePreview({
 
                 const isOrganizeSelected =
                   toolId === "organize-pdf" &&
+                  organizeMode != null &&
                   organizeMode?.mode !== "reorder" &&
                   organizeMode.selectedPages.includes(idx);
 

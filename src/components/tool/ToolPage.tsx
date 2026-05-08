@@ -514,7 +514,7 @@ export default function ToolPage() {
     // Use first output file for cloud save
     const outputFile = result.outputFiles[0];
     try {
-      await saveToGoogleDrive(outputFile.data, outputFile.name);
+      await saveToGoogleDrive(new Blob([new Uint8Array(outputFile.data)]), outputFile.name);
       toast({
         title: "Saved to Google Drive",
         description: `${outputFile.name} saved successfully`,

@@ -398,8 +398,8 @@ function formatTimeAgo(timestamp: number): string {
 // ========================
 
 export default function BulkCompressPDF() {
-  const { navigateHome, toast } = useAppStore();
-  const { toast: showToast } = useToast();
+  const { navigateHome } = useAppStore();
+  const { toast } = useToast();
 
   // File state
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -472,7 +472,7 @@ export default function BulkCompressPDF() {
     if (typeof window !== "undefined" && "Notification" in window) {
       setNotificationsEnabled(Notification.permission === "granted");
       if (Notification.permission !== "granted") {
-        showToast({
+        toast({
           title: "Notifications blocked",
           description:
             "Please enable notifications in your browser settings.",
@@ -480,7 +480,7 @@ export default function BulkCompressPDF() {
         });
       }
     }
-  }, [notificationsEnabled, showToast]);
+  }, [notificationsEnabled, toast]);
 
   // ========================
   // File management
@@ -497,7 +497,7 @@ export default function BulkCompressPDF() {
       );
 
       if (nonPdf.length > 0) {
-        showToast({
+        toast({
           title: "Unsupported files skipped",
           description: `${nonPdf.length} file(s) are not PDFs and were ignored.`,
           variant: "destructive",
@@ -505,7 +505,7 @@ export default function BulkCompressPDF() {
       }
 
       if (oversized.length > 0) {
-        showToast({
+        toast({
           title: "File too large",
           description: `${oversized.length} file(s) exceed the 100 MB limit.`,
           variant: "destructive",
@@ -518,7 +518,7 @@ export default function BulkCompressPDF() {
         const remaining = FILE_LIMIT - prev.length;
         const toAdd = validFiles.slice(0, remaining);
         if (validFiles.length > remaining) {
-          showToast({
+          toast({
             title: "Limit reached",
             description: `Only ${remaining} more file(s) can be added.`,
             variant: "destructive",
@@ -535,7 +535,7 @@ export default function BulkCompressPDF() {
         ];
       });
     },
-    [showToast],
+    [toast],
   );
 
   const removeFile = useCallback((id: string) => {
@@ -675,7 +675,7 @@ export default function BulkCompressPDF() {
         controller.signal,
       );
     } catch {
-      showToast({
+      toast({
         title: "Compression interrupted",
         description: "The process was cancelled.",
         variant: "destructive",
@@ -700,7 +700,7 @@ export default function BulkCompressPDF() {
         });
       }, 200);
     }
-  }, [files, compressionLevel, colorMode, notificationsEnabled, showToast]);
+  }, [files, compressionLevel, colorMode, notificationsEnabled, toast]);
 
   const cancelCompression = useCallback(() => {
     abortControllerRef.current?.abort();
@@ -721,7 +721,7 @@ export default function BulkCompressPDF() {
   // ========================
   const downloadSingleFile = useCallback((item: FileItem) => {
     if (!item.compressedData) return;
-    const blob = new Blob([item.compressedData], {
+    const blob = new Blob([new Uint8Array(item.compressedData)], {
       type: "application/pdf",
     });
     const fileName = item.file.name.replace(/\.pdf$/i, "_compressed.pdf");
@@ -735,7 +735,7 @@ export default function BulkCompressPDF() {
     if (completedFiles.length === 0) return;
 
     try {
-      showToast({
+      toast({
         title: "Creating ZIP…",
         description: "Packaging all compressed files into a ZIP archive.",
       });
@@ -748,18 +748,18 @@ export default function BulkCompressPDF() {
       );
 
       downloadBlob(zipBlob, "compressed-pdfs.zip");
-      showToast({
+      toast({
         title: "ZIP downloaded",
         description: `${completedFiles.length} file(s) saved.`,
       });
     } catch {
-      showToast({
+      toast({
         title: "ZIP creation failed",
         description: "Could not create the ZIP file. Try downloading individually.",
         variant: "destructive",
       });
     }
-  }, [files, showToast]);
+  }, [files, toast]);
 
   // ========================
   // Resume session handlers
@@ -789,11 +789,11 @@ export default function BulkCompressPDF() {
     setResumeSession(null);
 
     await deleteSession(resumeSession.id);
-    showToast({
+    toast({
       title: "Session restored",
       description: `${restored.length} file(s) loaded. You can continue compression.`,
     });
-  }, [resumeSession, showToast]);
+  }, [resumeSession, toast]);
 
   const handleDiscard = useCallback(async () => {
     if (resumeSession) {
