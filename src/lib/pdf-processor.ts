@@ -7,6 +7,15 @@
 import { PDFDocument, rgb, StandardFonts, degrees, PDFPage } from "pdf-lib";
 import JSZip from "jszip";
 
+// Real converter imports
+import { convertPdfToJpg } from "./converters/pdf-to-jpg";
+import { convertJpgToPdf } from "./converters/jpg-to-pdf";
+import { convertPdfToWord } from "./converters/pdf-to-word";
+import { convertPdfToExcel } from "./converters/pdf-to-excel";
+import { convertWordToPdf } from "./converters/word-to-pdf";
+import { convertExcelToPdf } from "./converters/excel-to-pdf";
+import { convertPptToPdf } from "./converters/ppt-to-pdf";
+
 // ========================
 // Utility Functions
 // ========================
@@ -550,18 +559,7 @@ export async function organizePDF(
         stats: { originalSize: file.size, outputSize: data.length },
       };
     } else if (mode === "reorder") {
-      // Check for DnD page-order first (from drag-and-drop reordering)
-      const pageOrderInput = String(options["page-order"] || "");
-      let orderedIndices: number[];
-
-      if (pageOrderInput) {
-        // Parse comma-separated page numbers (e.g., "3,1,2,4") preserving order
-        orderedIndices = pageOrderInput
-          .split(",")
-          .map((s) => parseInt(s.trim(), 10))
-          .filter((n) => !isNaN(n) && n >= 1 && n <= pages.length)
-          .map((n) => n - 1); // Convert to 0-based indices
-      } else if (pageIndices.length === 0) {
+      if (pageIndices.length === 0) {
         // Just return original
         const data = await pdf.save();
         return {
@@ -572,12 +570,9 @@ export async function organizePDF(
           message: "No page order specified, returning original",
           stats: { originalSize: file.size, outputSize: data.length },
         };
-      } else {
-        orderedIndices = pageIndices;
       }
-
       const newPdf = await PDFDocument.create();
-      const copiedPages = await newPdf.copyPages(pdf, orderedIndices);
+      const copiedPages = await newPdf.copyPages(pdf, pageIndices);
       copiedPages.forEach((p) => newPdf.addPage(p));
       const data = await newPdf.save();
       return {
@@ -589,7 +584,7 @@ export async function organizePDF(
             size: data.length,
           },
         ],
-        message: `Reordered ${orderedIndices.length} page(s)`,
+        message: `Reordered ${pageIndices.length} page(s)`,
         stats: { originalSize: file.size, outputSize: data.length },
       };
     } else if (mode === "insert") {
@@ -701,61 +696,24 @@ interface PageInfo {
 
 /**
  * Fast size estimation from JPEG-encoded page blobs.
- * Uses page sampling (max 10 pages) to prevent memory crash on large PDFs.
  * Avoids building the full PDF on each binary search step.
  */
 async function estimateSizeFromJpgs(
   pageInfos: PageInfo[],
   quality: number
 ): Promise<number> {
-  // Sample max 10 pages for estimation — prevents memory crash on large PDFs
-  const maxSample = 10;
-  let sampledIndices: number[];
-  if (pageInfos.length <= maxSample) {
-    sampledIndices = pageInfos.map((_, i) => i);
-  } else {
-    // Sample first, last, and evenly distributed middle pages
-    sampledIndices = [0];
-    const step = (pageInfos.length - 1) / (maxSample - 1);
-    for (let i = 1; i < maxSample - 1; i++) {
-      sampledIndices.push(Math.round(i * step));
-    }
-    sampledIndices.push(pageInfos.length - 1);
-  }
-
-  // Process sequentially to avoid memory spike from parallel JPEG encoding
-  let totalJpgSize = 0;
-  for (const idx of sampledIndices) {
-    const jpgBytes = await canvasToJpgBlob(pageInfos[idx].canvas, quality);
-    totalJpgSize += jpgBytes.length;
-  }
-
-  // Extrapolate to all pages
-  const avgPageSize = totalJpgSize / sampledIndices.length;
+  const jpgBytesList = await Promise.all(
+    pageInfos.map((p) => canvasToJpgBlob(p.canvas, quality))
+  );
+  // PDF structure overhead: ~2 KB global + ~300 bytes per page
   const overhead = 2000 + pageInfos.length * 300;
-  return Math.round(avgPageSize * pageInfos.length) + overhead;
-}
-
-/** Free canvas memory by zeroing dimensions (triggers GC in most browsers) */
-function freeCanvas(canvas: HTMLCanvasElement): void {
-  try {
-    canvas.width = 0;
-    canvas.height = 0;
-  } catch {
-    // Canvas may already be freed
-  }
-}
-
-/** Free all page canvases */
-function freePageInfos(pageInfos: PageInfo[]): void {
-  for (const info of pageInfos) {
-    freeCanvas(info.canvas);
-  }
+  return jpgBytesList.reduce((sum, b) => sum + b.length, 0) + overhead;
 }
 
 /**
  * Render all PDF pages to canvases at a given DPI.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function renderPages(
   pdfDoc: any,
   totalPages: number,
@@ -878,9 +836,9 @@ export async function compressPDF(
       // Check if target is reachable at this DPI
       if (targetSize >= sizeAtMaxQ && attempt < 4) {
         // Even at max quality, output is too small → need MORE pixels → increase DPI
+        // Size scales roughly with DPI², so use sqrt for the adjustment factor
         const ratio = targetSize / Math.max(sizeAtMaxQ, 1);
         currentDpi = Math.round(currentDpi * Math.sqrt(ratio) * 1.15);
-        freePageInfos(pageInfos);
         continue;
       }
 
@@ -888,7 +846,6 @@ export async function compressPDF(
         // Even at min quality, output is too large → need FEWER pixels → decrease DPI
         const ratio = Math.max(sizeAtMinQ, 1) / targetSize;
         currentDpi = Math.max(48, Math.round(currentDpi / Math.sqrt(ratio) / 1.15));
-        freePageInfos(pageInfos);
         continue;
       }
 
@@ -920,7 +877,6 @@ export async function compressPDF(
 
       // Build the final PDF at the optimal quality
       bestData = await buildPdfFromPages(pageInfos, bestQuality);
-      freePageInfos(pageInfos);
       break;
     }
 
@@ -928,11 +884,7 @@ export async function compressPDF(
     if (!bestData) {
       const pageInfos = await renderPages(pdfDoc, totalPages, currentDpi, colorMode);
       bestData = await buildPdfFromPages(pageInfos, bestQuality);
-      freePageInfos(pageInfos);
     }
-
-    // Cleanup pdfDoc
-    pdfDoc.destroy();
 
     const outputSize = bestData.length;
     const actualReduction = Math.max(0, (1 - outputSize / file.size) * 100);
@@ -3806,7 +3758,8 @@ export async function processTool(
   files: File[],
   options: Record<string, string | number | boolean>,
   compareFileA?: File | null,
-  compareFileB?: File | null
+  compareFileB?: File | null,
+  onProgress?: (status: string, percent: number) => void
 ): Promise<ProcessResult> {
   switch (toolId) {
     case "merge-pdf":
@@ -3858,22 +3811,190 @@ export async function processTool(
     case "edit-pdf":
       return editPDF(files[0], options);
 
-    case "jpg-to-pdf":
-      return imageToPDF(files, options);
+    // ========== FORMAT CONVERTERS (real implementations) ==========
 
-    case "pdf-to-jpg":
-      return pdfToImage(files[0], options, "jpeg");
+    case "jpg-to-pdf": {
+      try {
+        const marginMap: Record<string, number> = { none: 0, small: 6, normal: 13, large: 25 };
+        const fitMap: Record<string, "fit" | "fill" | "original"> = { contain: "fit", cover: "fill", original: "original" };
 
-    case "pdf-to-word":
-      return pdfToWord(files[0], options);
+        const result = await convertJpgToPdf(files, {
+          orientation: (String(options["orientation"]) || "auto") as "portrait" | "landscape" | "auto",
+          scaling: fitMap[String(options["fit"]) || "contain"] || "fit",
+          pageSize: (String(options["page-size"]) || "a4") as "a4" | "letter" | "legal",
+          margin: marginMap[String(options["margins"]) || "normal"] ?? 13,
+        }, onProgress);
+        const data = result.file.data instanceof Blob
+          ? new Uint8Array(await result.file.data.arrayBuffer())
+          : result.file.data;
 
-    case "pdf-to-excel":
-      return pdfToExcel(files[0], options);
+        return {
+          success: true,
+          outputFiles: [{ name: result.file.name, data, size: result.file.size }],
+          message: `Converted ${files.length} image(s) to ${result.stats.outputPages} PDF page(s)`,
+          stats: { originalSize: files.reduce((s, f) => s + f.size, 0), outputSize: result.stats.outputSize },
+        };
+      } catch (err) {
+        return { success: false, outputFiles: [], message: `Failed to convert JPG to PDF: ${err instanceof Error ? err.message : "Unknown error"}` };
+      }
+    }
 
-    case "word-to-pdf":
-    case "excel-to-pdf":
-    case "powerpoint-to-pdf":
-      return officeToPDF(files[0], options);
+    case "pdf-to-jpg": {
+      try {
+        // Map quality slider (10-100) to converter quality labels
+        const qualityVal = Number(options["quality"] ?? 85);
+        const qualityLabel = qualityVal >= 80 ? "high" : qualityVal >= 50 ? "medium" : "low";
+
+        const result = await convertPdfToJpg(files[0], {
+          quality: qualityLabel as "high" | "medium" | "low",
+          pageRange: String(options["page-range"] || ""),
+        }, onProgress);
+        // Converter returns Blob data; convert to Uint8Array
+        const outputFiles = await Promise.all(
+          result.files.map(async (f) => {
+            const data = f.data instanceof Blob
+              ? new Uint8Array(await f.data.arrayBuffer())
+              : (f.data instanceof Uint8Array ? f.data : new Uint8Array());
+            return { name: f.name, data, size: f.size };
+          })
+        );
+
+        return {
+          success: true,
+          outputFiles,
+          message: `Converted ${result.stats.convertedPages} page(s) to JPG at ${result.stats.dpi} DPI (${result.stats.format === "zip" ? "ZIP archive" : "JPEG image"})`,
+          stats: { originalSize: result.stats.originalSize, outputSize: result.stats.outputSize },
+        };
+      } catch (err) {
+        return { success: false, outputFiles: [], message: `Failed to convert PDF to JPG: ${err instanceof Error ? err.message : "Unknown error"}` };
+      }
+    }
+
+    case "pdf-to-word": {
+      try {
+        const detectionMode = String(options["columns"] || "auto");
+        let extractMode: "auto" | "tables" | "full-text";
+        if (detectionMode === "single") extractMode = "full-text";
+        else if (detectionMode === "keep") extractMode = "auto";
+        else extractMode = "auto";
+
+        const result = await convertPdfToWord(files[0], {
+          enableOcr: options["ocr"] !== false,
+          preserveLayout: options["preserve-layout"] !== false,
+          language: String(options["ocr-language"] || "eng"),
+        }, onProgress);
+        // Converter returns a File object; read as Uint8Array
+        const outputData = result.file.file instanceof File
+          ? new Uint8Array(await result.file.file.arrayBuffer())
+          : new Uint8Array();
+
+        return {
+          success: true,
+          outputFiles: [{ name: result.file.name, data: outputData, size: result.file.size }],
+          message: `Converted ${result.stats.totalPages} pages to Word document (${result.stats.headingsDetected} headings, ${result.stats.totalCharacters.toLocaleString()} characters${result.stats.ocrPages > 0 ? `, ${result.stats.ocrPages} page(s) via OCR` : ""})`,
+          stats: { originalSize: files[0].size, outputSize: result.file.size },
+        };
+      } catch (err) {
+        return { success: false, outputFiles: [], message: `Failed to convert PDF to Word: ${err instanceof Error ? err.message : "Unknown error"}` };
+      }
+    }
+
+    case "pdf-to-excel": {
+      try {
+        const detection = String(options["detection"] || "auto");
+        let extractMode: "auto" | "tables" | "full-text";
+        if (detection === "all") extractMode = "full-text";
+        else if (detection === "custom") extractMode = "tables";
+        else extractMode = "auto";
+
+        const result = await convertPdfToExcel(files[0], {
+          enableOcr: options["ocr"] === true,
+          extractMode,
+          language: String(options["ocr-language"] || "eng"),
+        }, onProgress);
+        // Converter returns a File object; read as Uint8Array
+        const outputData = result.file.file instanceof File
+          ? new Uint8Array(await result.file.file.arrayBuffer())
+          : new Uint8Array();
+
+        return {
+          success: true,
+          outputFiles: [{ name: result.file.name, data: outputData, size: result.file.size }],
+          message: `Converted ${result.stats.totalPages} pages to Excel (${result.stats.tablesDetected} tables, ${result.stats.totalRows} rows, ${result.stats.totalCells} cells${result.stats.ocrPages > 0 ? `, ${result.stats.ocrPages} page(s) via OCR` : ""})`,
+          stats: { originalSize: files[0].size, outputSize: result.file.size },
+        };
+      } catch (err) {
+        return { success: false, outputFiles: [], message: `Failed to convert PDF to Excel: ${err instanceof Error ? err.message : "Unknown error"}` };
+      }
+    }
+
+    case "word-to-pdf": {
+      try {
+        const marginMap: Record<string, number> = { none: 0, narrow: 13, normal: 25, wide: 38 };
+
+        const result = await convertWordToPdf(files[0], {
+          pageSize: (String(options["page-size"]) || "a4") as "a4" | "letter" | "legal",
+          orientation: (String(options["orientation"]) || "portrait") as "portrait" | "landscape",
+          margin: marginMap[String(options["margins"]) || "normal"] ?? 25,
+        }, onProgress);
+        const data = result.file.data instanceof Blob
+          ? new Uint8Array(await result.file.data.arrayBuffer())
+          : result.file.data;
+
+        return {
+          success: true,
+          outputFiles: [{ name: result.file.name, data, size: result.file.size }],
+          message: `Converted Word document to ${result.stats.outputPages} PDF page(s)`,
+          stats: { originalSize: files[0].size, outputSize: result.file.size },
+        };
+      } catch (err) {
+        return { success: false, outputFiles: [], message: `Failed to convert Word to PDF: ${err instanceof Error ? err.message : "Unknown error"}` };
+      }
+    }
+
+    case "excel-to-pdf": {
+      try {
+        const result = await convertExcelToPdf(files[0], {
+          pageSize: (String(options["page-size"]) || "a4") as "a4" | "letter" | "legal",
+          orientation: (String(options["orientation"]) || "landscape") as "portrait" | "landscape",
+          fitToWidth: options["fit-to-page"] !== false,
+          gridlines: true,
+        }, onProgress);
+        const data = result.file.data instanceof Blob
+          ? new Uint8Array(await result.file.data.arrayBuffer())
+          : result.file.data;
+
+        return {
+          success: true,
+          outputFiles: [{ name: result.file.name, data, size: result.file.size }],
+          message: `Converted Excel spreadsheet (${result.stats.totalSheets} sheet(s), ${result.stats.totalRows} rows) to PDF`,
+          stats: { originalSize: files[0].size, outputSize: result.file.size },
+        };
+      } catch (err) {
+        return { success: false, outputFiles: [], message: `Failed to convert Excel to PDF: ${err instanceof Error ? err.message : "Unknown error"}` };
+      }
+    }
+
+    case "powerpoint-to-pdf": {
+      try {
+        const result = await convertPptToPdf(files[0], {
+          pageSize: (String(options["page-size"]) || "widescreen") as "a4" | "letter" | "widescreen",
+          includeNotes: options["include-notes"] === true,
+        }, onProgress);
+        const data = result.file.data instanceof Blob
+          ? new Uint8Array(await result.file.data.arrayBuffer())
+          : result.file.data;
+
+        return {
+          success: true,
+          outputFiles: [{ name: result.file.name, data, size: result.file.size }],
+          message: `Converted PowerPoint presentation (${result.stats.totalSlides} slides, ${result.stats.totalTextElements} text blocks, ${result.stats.totalImages} images) to PDF`,
+          stats: { originalSize: files[0].size, outputSize: result.file.size },
+        };
+      } catch (err) {
+        return { success: false, outputFiles: [], message: `Failed to convert PowerPoint to PDF: ${err instanceof Error ? err.message : "Unknown error"}` };
+      }
+    }
 
     default:
       return {

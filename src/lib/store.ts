@@ -15,6 +15,7 @@ interface AppState {
   selectedToolId: string | null;
   uploadedFiles: File[];
   processingProgress: number;
+  processingStatus: string;
   isProcessing: boolean;
   isComplete: boolean;
   authDialogOpen: boolean;
@@ -35,6 +36,7 @@ interface AppState {
   clearFiles: () => void;
   startProcessing: () => void;
   setProcessingProgress: (progress: number) => void;
+  setProcessingStatus: (status: string) => void;
   completeProcessing: () => void;
   resetTool: () => void;
 }
@@ -44,6 +46,7 @@ function resetToolState() {
     selectedToolId: null,
     uploadedFiles: [],
     processingProgress: 0,
+    processingStatus: "",
     isProcessing: false,
     isComplete: false,
   };
@@ -54,6 +57,7 @@ export const useAppStore = create<AppState>((set) => ({
   selectedToolId: null,
   uploadedFiles: [],
   processingProgress: 0,
+  processingStatus: "",
   isProcessing: false,
   isComplete: false,
   authDialogOpen: false,
@@ -101,9 +105,11 @@ export const useAppStore = create<AppState>((set) => ({
 
   clearFiles: () => set({ uploadedFiles: [] }),
 
-  startProcessing: () => set({ isProcessing: true, processingProgress: 0, isComplete: false }),
+  startProcessing: () => set({ isProcessing: true, processingProgress: 0, processingStatus: "Initializing...", isComplete: false }),
 
   setProcessingProgress: (progress) => set({ processingProgress: progress }),
+
+  setProcessingStatus: (status) => set({ processingStatus: status }),
 
   completeProcessing: () =>
     set({ isProcessing: false, isComplete: true, processingProgress: 100 }),
@@ -112,6 +118,7 @@ export const useAppStore = create<AppState>((set) => ({
     set({
       uploadedFiles: [],
       processingProgress: 0,
+      processingStatus: "",
       isProcessing: false,
       isComplete: false,
     }),
