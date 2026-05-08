@@ -10,43 +10,8 @@ import {
   ChevronRight,
   Grid3X3,
   List,
-  GripVertical,
-  ChevronDown,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import * as pdfjsLib from "pdfjs-dist";
-if (typeof window !== "undefined") {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-}
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  TouchSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  rectSortingStrategy,
-  arrayMove,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-
-// ═══════════════════════════════════════════════════════════
-// PDF Rendering Architecture:
-// - pdfjs-dist uses a dedicated Web Worker for PDF parsing
-//   (configured via GlobalWorkerOptions.workerSrc above)
-// - Preview rendering: Two-phase approach
-//   Phase 1: Instant Page 1 at 0.8 scale (< 1s)
-//   Phase 2: Background all pages at 0.35 scale (progressive)
-// - Heavy tool processing (compress, merge, etc.) uses pdf-lib
-//   on the main thread with progress animation for UX
-// ═══════════════════════════════════════════════════════════
 
 // ========================
 // Enable List (Tool Specificity)
@@ -81,7 +46,6 @@ interface LivePreviewProps {
   optionValues: Record<string, string | number | boolean>;
   compareFileA?: File | null;
   compareFileB?: File | null;
-  onPageOrderChange?: (order: number[]) => void;
 }
 
 // ========================
@@ -100,58 +64,13 @@ function formatSize(bytes: number): string {
 // PDF Page Renderer
 // ========================
 
-const MAX_INITIAL_PREVIEW_PAGES = 20;
-const QUICK_PREVIEW_SCALE = 0.8; // High quality for instant Page 1 preview
+let pdfJsModule: typeof import("pdfjs-dist") | null = null;
 
-interface RenderResult {
-  pages: PreviewPage[];
-  totalPageCount: number;
-}
-
-// Render a single file's pages to thumbnails (with optional limit for stability)
-async function renderPdfPages(
-  file: File,
-  maxPages = MAX_INITIAL_PREVIEW_PAGES,
-  scale = 0.35,
-  destroyDoc = true
-): Promise<RenderResult> {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  const totalPageCount = pdf.numPages;
-  const renderCount = Math.min(totalPageCount, maxPages);
-  const pages: PreviewPage[] = [];
-
-  try {
-    for (let i = 0; i < renderCount; i++) {
-      if (!destroyDoc) continue;
-
-      const page = await pdf.getPage(i + 1);
-      const viewport = page.getViewport({ scale });
-      const canvas = document.createElement("canvas");
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext("2d")!;
-      const renderTask = page.render({ canvasContext: ctx, viewport });
-      await renderTask.promise;
-      pages.push({
-        pageNum: i + 1,
-        dataUrl: canvas.toDataURL("image/jpeg", 0.5),
-        width: viewport.width,
-        height: viewport.height,
-        originalWidth: page.getViewport({ scale: 1 }).width,
-        originalHeight: page.getViewport({ scale: 1 }).height,
-      });
-
-      // Yield to UI thread every 3 pages to keep rendering responsive
-      if (i % 3 === 2) {
-        await new Promise((resolve) => requestAnimationFrame(resolve));
-      }
-    }
-  } finally {
-    try { pdf.destroy(); } catch { /* ignore */ }
-  }
-
-  return { pages, totalPageCount };
+async function getPdfjs() {
+  if (pdfJsModule) return pdfJsModule;
+  pdfJsModule = await import("pdfjs-dist");
+  pdfJsModule.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+  return pdfJsModule;
 }
 
 function parsePageRange(input: string, totalPages: number): number[] {
@@ -178,7 +97,38 @@ function parsePageRange(input: string, totalPages: number): number[] {
   return Array.from(indices).sort((a, b) => a - b);
 }
 
+// Render a single file's pages to thumbnails
+async function renderPdfPages(
+  file: File,
+  maxPages = 50,
+  scale = 0.4
+): Promise<PreviewPage[]> {
+  const pdfjs = await getPdfjs();
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  // BUG FIX: pdfjs-dist uses .numPages (property), NOT .getPageCount() (method)
+  const pageCount = Math.min(pdf.numPages, maxPages);
+  const pages: PreviewPage[] = [];
 
+  for (let i = 0; i < pageCount; i++) {
+    const page = await pdf.getPage(i + 1);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d")!;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    pages.push({
+      pageNum: i + 1,
+      dataUrl: canvas.toDataURL("image/jpeg", 0.7),
+      width: viewport.width,
+      height: viewport.height,
+      originalWidth: page.getViewport({ scale: 1 }).width,
+      originalHeight: page.getViewport({ scale: 1 }).height,
+    });
+  }
+  return pages;
+}
 
 // Render image file to thumbnail
 async function renderImageThumbnail(
@@ -346,349 +296,6 @@ function toAlpha(num: number): string {
 }
 
 // ========================
-// Sortable Page Thumbnail (DnD)
-// ========================
-
-interface SortablePageThumbnailProps {
-  page: PreviewPage;
-  index: number;
-  isReorderMode: boolean;
-  toolId: string;
-  organizeMode: { mode: string; selectedPages: number[]; blankPos: number } | null;
-  viewMode: "grid" | "list";
-  getRotation: (pageNum: number) => number;
-  getPageNumberStyle: (pageNum: number) => { position: string; text: string; fontSize: number } | null;
-  splitGroups: SplitGroup[];
-  watermarkStyle: {
-    text: string;
-    opacity: number;
-    rotation: number;
-    fontSize: number;
-    rgba: string;
-  } | null;
-  signStyle: {
-    signType: string;
-    name: string;
-    position: string;
-    page: number;
-    signColor: string;
-    signFontSize: number;
-    signFont: string;
-    signatureData: string;
-    sigImageSize: number;
-  } | null;
-}
-
-function SortablePageThumbnail({
-  page,
-  index,
-  isReorderMode,
-  toolId,
-  organizeMode,
-  viewMode,
-  getRotation,
-  getPageNumberStyle,
-  splitGroups,
-  watermarkStyle,
-  signStyle,
-}: SortablePageThumbnailProps) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    setActivatorNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: page.pageNum });
-
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-    zIndex: isDragging ? 50 : undefined,
-    position: "relative" as const,
-  };
-
-  const rotation = getRotation(page.pageNum);
-  const pageNumStyle = getPageNumberStyle(page.pageNum);
-  const isSplitHighlighted = toolId === "split-pdf";
-  const splitGroup = isSplitHighlighted
-    ? splitGroups.find((g) => g.pages.includes(page.pageNum))
-    : null;
-
-  const isOrganizeSelected =
-    toolId === "organize-pdf" &&
-    organizeMode?.mode !== "reorder" &&
-    (organizeMode?.selectedPages ?? []).includes(index);
-
-  return (
-    <div ref={setNodeRef} style={style}>
-      <motion.div
-        layout
-        initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ delay: index * 0.02 }}
-        className={`relative group rounded-lg overflow-hidden border bg-white dark:bg-zinc-900 transition-all hover:shadow-md ${
-          isDragging
-            ? "border-2 border-primary ring-2 ring-primary/30 shadow-lg"
-            : splitGroup
-            ? `${splitGroup.borderColor} ${splitGroup.bgColor} border-2`
-            : "border-border"
-        } ${isOrganizeSelected ? "border-2 border-amber-400 bg-amber-50/50 dark:bg-amber-950/20" : ""}`}
-        style={{
-          ...(viewMode === "list" && {
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-          }),
-        }}
-      >
-        {/* Drag handle — visible only in reorder mode, 44px touch target for mobile */}
-        {isReorderMode && (
-          <button
-            ref={setActivatorNodeRef}
-            {...attributes}
-            {...listeners}
-            className="absolute top-1/2 left-1 -translate-y-1/2 z-10 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-md bg-black/40 hover:bg-black/60 text-white cursor-grab active:cursor-grabbing transition-colors opacity-0 group-hover:opacity-100"
-            style={{ touchAction: "none" }}
-            aria-label={`Drag page ${page.pageNum}`}
-          >
-            <GripVertical className="w-4 h-4" />
-          </button>
-        )}
-
-        {/* Page thumbnail wrapper */}
-        <div
-          className={`relative overflow-hidden ${
-            viewMode === "grid"
-              ? isReorderMode
-                ? "aspect-[3/4] ml-3"
-                : "aspect-[3/4]"
-              : isReorderMode
-              ? "w-24 h-32 flex-shrink-0 ml-3"
-              : "w-24 h-32 flex-shrink-0"
-          }`}
-        >
-          {/* PDF page image with rotation — lazy loaded for performance */}
-          <img
-            src={page.dataUrl}
-            alt={`Page ${page.pageNum}`}
-            className="w-full h-full object-contain"
-            loading="lazy"
-            decoding="async"
-            style={{
-              transform: rotation ? `rotate(${rotation}deg)` : undefined,
-              transition: "transform 0.3s ease",
-            }}
-            draggable={!isReorderMode}
-          />
-
-          {/* Watermark overlay */}
-          {watermarkStyle && watermarkStyle.text && (
-            <div
-              className="absolute inset-0 flex items-center justify-center pointer-events-none"
-              style={{ opacity: watermarkStyle.opacity }}
-            >
-              <span
-                className="font-bold whitespace-nowrap select-none"
-                style={{
-                  fontSize: `${watermarkStyle.fontSize}px`,
-                  color: `${watermarkStyle.rgba}${watermarkStyle.opacity})`,
-                  transform: `rotate(${watermarkStyle.rotation}deg)`,
-                  textShadow: "1px 1px 2px rgba(255,255,255,0.5)",
-                }}
-              >
-                {watermarkStyle.text}
-              </span>
-            </div>
-          )}
-
-          {/* Signature overlay — type, draw, and upload modes */}
-          {signStyle && (() => {
-            const isOnThisPage = !signStyle.page || signStyle.page === page.pageNum;
-            if (!isOnThisPage) return null;
-
-            const hasTypedName = signStyle.signType === "type" && signStyle.name;
-            const hasSignatureImage = (signStyle.signType === "draw" || signStyle.signType === "upload") && signStyle.signatureData;
-            if (!hasTypedName && !hasSignatureImage) return null;
-
-            const posMap: Record<string, string> = {
-              "bottom-right": "bottom-3 right-3 items-end justify-end",
-              "bottom-left": "bottom-3 left-3 items-end justify-start",
-              "bottom-center": "bottom-3 left-1/2 -translate-x-1/2 items-end justify-center",
-              "top-right": "top-3 right-3 items-start justify-end",
-              "top-left": "top-3 left-3 items-start justify-start",
-              "top-center": "top-3 left-1/2 -translate-x-1/2 items-start justify-center",
-            };
-            const posClass = posMap[signStyle.position] || posMap["bottom-right"];
-
-            const fontMap: Record<string, string> = {
-              georgia: "Georgia, serif",
-              palatino: "'Palatino Linotype', 'Book Antiqua', Palatino, serif",
-              dancing: "var(--font-dancing), cursive",
-              greatvibes: "var(--font-greatvibes), cursive",
-              kalam: "var(--font-kalam), cursive",
-              parisienne: "var(--font-parisienne), cursive",
-              caveat: "var(--font-caveat), cursive",
-            };
-
-            return (
-              <div className={`absolute inset-0 flex ${posClass} pointer-events-none p-2`}>
-                {hasTypedName ? (
-                  <div className="flex flex-col items-center">
-                    <span
-                      style={{
-                        fontFamily: fontMap[signStyle.signFont] || "Georgia, serif",
-                        fontSize: `${Math.max(signStyle.signFontSize * 0.4, 14)}px`,
-                        color: signStyle.signColor,
-                        fontStyle: "italic",
-                        textShadow: "0 1px 2px rgba(255,255,255,0.8)",
-                      }}
-                    >
-                      {signStyle.name}
-                    </span>
-                    <div
-                      className="mt-0.5"
-                      style={{
-                        width: `${Math.max(signStyle.signFontSize * 0.9, 50)}px`,
-                        height: "1px",
-                        backgroundColor: signStyle.signColor + "88",
-                      }}
-                    />
-                  </div>
-                ) : hasSignatureImage ? (
-                  <img
-                    src={signStyle.signatureData}
-                    alt="Signature preview"
-                    className="object-contain"
-                    loading="lazy"
-                    style={{
-                      maxWidth: `${Math.max(signStyle.sigImageSize * 0.4, 60)}px`,
-                      maxHeight: `${Math.max(signStyle.sigImageSize * 0.4, 60)}px`,
-                      opacity: 0.95,
-                      filter: "drop-shadow(0 1px 2px rgba(255,255,255,0.8))",
-                    }}
-                  />
-                ) : null}
-              </div>
-            );
-          })()}
-
-          {/* Page number overlay */}
-          {pageNumStyle && (
-            <div
-              className="absolute inset-0 flex pointer-events-none select-none"
-              style={{
-                alignItems:
-                  pageNumStyle.position.includes("bottom")
-                    ? "flex-end"
-                    : "flex-start",
-                justifyContent: pageNumStyle.position.includes("center")
-                  ? "center"
-                  : pageNumStyle.position.includes("right")
-                  ? "flex-end"
-                  : "flex-start",
-                padding: "8px 12px",
-              }}
-            >
-              <span
-                className="text-gray-500 dark:text-gray-400 font-medium bg-white/80 dark:bg-zinc-800/80 px-1.5 py-0.5 rounded text-center"
-                style={{ fontSize: `${Math.min(pageNumStyle.fontSize, 14)}px` }}
-              >
-                {pageNumStyle.text}
-              </span>
-            </div>
-          )}
-
-          {/* Organize: blank page indicator */}
-          {toolId === "organize-pdf" &&
-            organizeMode?.mode === "insert" &&
-            organizeMode.blankPos === page.pageNum && (
-              <div className="absolute inset-0 border-2 border-dashed border-violet-400 bg-violet-50/40 dark:bg-violet-950/30 flex items-center justify-center">
-                <span className="text-xs text-violet-500 font-medium bg-white/90 dark:bg-zinc-900/90 px-2 py-1 rounded">
-                  + Blank
-                </span>
-              </div>
-            )}
-
-          {/* Page number badge */}
-          <div className="absolute top-1.5 left-1.5">
-            <span className="text-[10px] font-bold bg-black/60 text-white px-1.5 py-0.5 rounded">
-              {page.pageNum}
-            </span>
-          </div>
-
-          {/* Drag indicator badge — shown in reorder mode */}
-          {isReorderMode && (
-            <div className="absolute top-1.5 right-1.5">
-              <span className="text-[10px] font-medium bg-primary/80 text-white px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                <GripVertical className="w-2.5 h-2.5" />
-              </span>
-            </div>
-          )}
-
-          {/* Rotate indicator */}
-          {rotation > 0 && !isReorderMode && (
-            <div className="absolute top-1.5 right-1.5">
-              <span className="text-[10px] font-bold bg-primary/80 text-white px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                <RotateCw className="w-2.5 h-2.5" />
-                {rotation}&deg;
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Page info (list mode) */}
-        {viewMode === "list" && (
-          <div className="flex-1 p-3 min-w-0">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium">Page {page.pageNum}</span>
-              <span className="text-[10px] text-muted-foreground">
-                {Math.round(page.originalWidth)} &times; {Math.round(page.originalHeight)} pt
-              </span>
-            </div>
-            {splitGroup && (
-              <Badge variant="secondary" className={`text-[10px] mt-1 ${splitGroup.color}`}>
-                {splitGroup.label}
-              </Badge>
-            )}
-            {isOrganizeSelected && (
-              <Badge variant="secondary" className="text-[10px] mt-1 text-amber-600">
-                {organizeMode?.mode === "delete"
-                  ? "Will be deleted"
-                  : organizeMode?.mode === "extract"
-                  ? "Will be extracted"
-                  : "Selected"}
-              </Badge>
-            )}
-          </div>
-        )}
-
-        {/* Grid mode info */}
-        {viewMode === "grid" && (
-          <div className="px-2 py-1.5 border-t border-border/50">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-medium text-muted-foreground">
-                Page {page.pageNum}
-              </span>
-              {splitGroup && (
-                <span className={`text-[9px] ${splitGroup.color}`}>
-                  {splitGroup.label}
-                </span>
-              )}
-              {isOrganizeSelected && (
-                <span className="text-[9px] text-amber-600 font-medium">Selected</span>
-              )}
-            </div>
-          </div>
-        )}
-      </motion.div>
-    </div>
-  );
-}
-
-// ========================
 // Main Component
 // ========================
 
@@ -699,7 +306,6 @@ export default function LivePreview({
   // Kept for backward compatibility with callers that still pass these props
   compareFileA: _compareFileA,
   compareFileB: _compareFileB,
-  onPageOrderChange,
 }: LivePreviewProps) {
   // === ALL HOOKS MUST BE CALLED BEFORE ANY EARLY RETURN ===
 
@@ -708,18 +314,7 @@ export default function LivePreview({
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [currentPage, setCurrentPage] = useState(0);
-  const [totalPdfPageCount, setTotalPdfPageCount] = useState(0);
-  const [isExpanding, setIsExpanding] = useState(false);
-  const [isBackgroundLoading, setIsBackgroundLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const pdfDocRef = useRef<{ destroy: () => void } | null>(null);
-
-  // DnD sensors for organize-pdf reorder mode (PointerSensor for desktop, TouchSensor for mobile)
-  const dndSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  );
 
   const isPdf = files.length > 0 && files[0]?.type === "application/pdf";
   const isImage =
@@ -727,7 +322,7 @@ export default function LivePreview({
     (files[0]?.type?.startsWith("image/") ||
       files[0]?.name?.match(/\.(jpe?g|png|gif|webp|bmp)$/i));
 
-  // Render pages when files change (limited to MAX_INITIAL_PREVIEW_PAGES for stability)
+  // Render pages when files change
   useEffect(() => {
     let cancelled = false;
 
@@ -736,7 +331,6 @@ export default function LivePreview({
       setError(null);
       setPages([]);
       setCurrentPage(0);
-      setTotalPdfPageCount(0);
 
       try {
         if (files.length === 0) {
@@ -745,31 +339,10 @@ export default function LivePreview({
         }
 
         if (isPdf && files[0]) {
-          // ── Phase 1: INSTANT — render only Page 1 at high quality (scale 0.8) ──
-          // pdfjs Web Worker handles PDF parsing off-main-thread.
-          // Canvas rendering happens here but only 1 page = instant (<1s).
-          const quickResult = await renderPdfPages(files[0], 1, QUICK_PREVIEW_SCALE);
-          if (cancelled) return;
-          setPages(quickResult.pages);
-          setTotalPdfPageCount(quickResult.totalPageCount);
-          setLoading(false);
-
-          // ── Phase 2: BACKGROUND — render all pages at thumbnail scale (0.35) ──
-          // Progressive: updates the grid as each page is rendered via rAF batching.
-          // For single-page PDFs, Phase 2 is skipped (keeps high-quality preview).
-          if (quickResult.totalPageCount > 1 && !cancelled) {
-            setIsBackgroundLoading(true);
-            try {
-              const fullResult = await renderPdfPages(files[0], MAX_INITIAL_PREVIEW_PAGES, 0.35);
-              if (!cancelled) {
-                setPages(fullResult.pages);
-                setTotalPdfPageCount(fullResult.totalPageCount);
-              }
-            } catch {
-              // Background render failed — Page 1 preview is still visible
-            } finally {
-              if (!cancelled) setIsBackgroundLoading(false);
-            }
+          const rendered = await renderPdfPages(files[0], 50, 0.5);
+          if (!cancelled) {
+            setPages(rendered);
+            setLoading(false);
           }
         } else if (isImage) {
           const allPages: PreviewPage[] = [];
@@ -783,7 +356,6 @@ export default function LivePreview({
           }
           if (!cancelled) {
             setPages(allPages);
-            setTotalPdfPageCount(allPages.length);
             setLoading(false);
           }
         } else {
@@ -800,31 +372,10 @@ export default function LivePreview({
     render();
     return () => {
       cancelled = true;
-      // Clean up pdf.js document reference on unmount
-      if (pdfDocRef.current) {
-        try { pdfDocRef.current.destroy(); } catch { /* ignore */ }
-        pdfDocRef.current = null;
-      }
     };
   }, [files, isPdf, isImage]);
 
-  // Load More handler — renders all remaining pages
-  const handleLoadAllPages = useCallback(async () => {
-    if (!files[0] || isExpanding) return;
-    setIsExpanding(true);
-    try {
-      const result = await renderPdfPages(files[0], totalPdfPageCount, 0.35);
-      setPages(result.pages);
-      setTotalPdfPageCount(result.totalPageCount);
-    } catch {
-      // silently fail — already rendered pages are still visible
-    } finally {
-      setIsExpanding(false);
-    }
-  }, [files, isExpanding, totalPdfPageCount]);
-
   const totalPages = pages.length;
-  const hasMorePages = totalPdfPageCount > MAX_INITIAL_PREVIEW_PAGES && pages.length < totalPdfPageCount;
 
   // Get rotation for a page
   const getRotation = useCallback(
@@ -912,29 +463,6 @@ export default function LivePreview({
     return { mode, selectedPages: parsePageRange(pageRange, totalPages), blankPos };
   }, [toolId, optionValues, totalPages]);
 
-  // Whether DnD reorder is active for organize-pdf
-  const isReorderMode = toolId === "organize-pdf" && organizeMode?.mode === "reorder";
-
-  // Handle DnD reorder end
-  const handleDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      const { active, over } = event;
-      if (active.id !== over?.id) {
-        setPages((prev) => {
-          const oldIndex = prev.findIndex((p) => p.pageNum === active.id);
-          const newIndex = prev.findIndex((p) => p.pageNum === over!.id);
-          const reordered = arrayMove(prev, oldIndex, newIndex);
-          // Communicate new page order to parent
-          if (onPageOrderChange) {
-            onPageOrderChange(reordered.map((p) => p.pageNum));
-          }
-          return reordered;
-        });
-      }
-    },
-    [onPageOrderChange]
-  );
-
   // === EARLY RETURN: Only show Live Preview for enabled tools ===
   if (!LIVE_PREVIEW_ENABLED.includes(toolId)) return null;
 
@@ -955,11 +483,7 @@ export default function LivePreview({
           <h3 className="text-sm font-semibold">Live Preview</h3>
           {totalPages > 0 && (
             <Badge variant="secondary" className="text-xs">
-              {isBackgroundLoading
-                ? `Loading ${totalPdfPageCount} pages...`
-                : hasMorePages
-                ? `${totalPages} of ${totalPdfPageCount} pages`
-                : `${totalPdfPageCount} ${totalPdfPageCount === 1 ? "page" : "pages"}`}
+              {totalPages} {totalPages === 1 ? "page" : "pages"}
             </Badge>
           )}
         </div>
@@ -1124,323 +648,258 @@ export default function LivePreview({
             )}
 
             {/* Page Grid / List */}
-            {isReorderMode ? (
-              <DndContext
-                sensors={dndSensors}
-                collisionDetection={closestCenter}
-                onDragEnd={handleDragEnd}
-              >
-                <SortableContext
-                  items={pages.map((p) => p.pageNum)}
-                  strategy={rectSortingStrategy}
-                >
-                  <div
-                    className={`p-4 ${
-                      viewMode === "grid"
-                        ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 max-h-[500px] overflow-y-auto"
-                        : "flex flex-col gap-3 max-h-[400px] overflow-y-auto"
-                    }`}
+            <div
+              className={`p-4 ${
+                viewMode === "grid"
+                  ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 max-h-[500px] overflow-y-auto"
+                  : "flex flex-col gap-3 max-h-[400px] overflow-y-auto"
+              }`}
+            >
+              {pages.map((page, idx) => {
+                const rotation = getRotation(page.pageNum);
+                const pageNumStyle = getPageNumberStyle(page.pageNum);
+                const isSplitHighlighted = toolId === "split-pdf";
+                const splitGroup = isSplitHighlighted
+                  ? splitGroups.find((g) => g.pages.includes(page.pageNum))
+                  : null;
+
+                const isOrganizeSelected =
+                  toolId === "organize-pdf" &&
+                  organizeMode?.mode !== "reorder" &&
+                  organizeMode.selectedPages.includes(idx);
+
+                return (
+                  <motion.div
+                    key={page.pageNum}
+                    layout
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: idx * 0.02 }}
+                    className={`relative group rounded-lg overflow-hidden border bg-white dark:bg-zinc-900 transition-all hover:shadow-md ${
+                      splitGroup
+                        ? `${splitGroup.borderColor} ${splitGroup.bgColor} border-2`
+                        : "border-border"
+                    } ${isOrganizeSelected ? "border-2 border-amber-400 bg-amber-50/50 dark:bg-amber-950/20" : ""}`}
+                    style={{
+                      ...(viewMode === "list" && {
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
+                      }),
+                    }}
                   >
-                    {pages.map((page, idx) => (
-                      <SortablePageThumbnail
-                        key={page.pageNum}
-                        page={page}
-                        index={idx}
-                        isReorderMode={isReorderMode}
-                        toolId={toolId}
-                        organizeMode={organizeMode}
-                        viewMode={viewMode}
-                        getRotation={getRotation}
-                        getPageNumberStyle={getPageNumberStyle}
-                        splitGroups={splitGroups}
-                        watermarkStyle={watermarkStyle}
-                        signStyle={signStyle}
-                      />
-                    ))}
-                  </div>
-                </SortableContext>
-              </DndContext>
-            ) : (
-              <div
-                className={`p-4 ${
-                  viewMode === "grid"
-                    ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 max-h-[500px] overflow-y-auto"
-                    : "flex flex-col gap-3 max-h-[400px] overflow-y-auto"
-                }`}
-              >
-                {pages.map((page, idx) => {
-                  const rotation = getRotation(page.pageNum);
-                  const pageNumStyle = getPageNumberStyle(page.pageNum);
-                  const isSplitHighlighted = toolId === "split-pdf";
-                  const splitGroup = isSplitHighlighted
-                    ? splitGroups.find((g) => g.pages.includes(page.pageNum))
-                    : null;
-
-                  const isOrganizeSelected =
-                    toolId === "organize-pdf" &&
-                    organizeMode?.mode !== "reorder" &&
-                    (organizeMode?.selectedPages ?? []).includes(idx);
-
-                  return (
-                    <motion.div
-                      key={page.pageNum}
-                      layout
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: idx * 0.02 }}
-                      className={`relative group rounded-lg overflow-hidden border bg-white dark:bg-zinc-900 transition-all hover:shadow-md ${
-                        splitGroup
-                          ? `${splitGroup.borderColor} ${splitGroup.bgColor} border-2`
-                          : "border-border"
-                      } ${isOrganizeSelected ? "border-2 border-amber-400 bg-amber-50/50 dark:bg-amber-950/20" : ""}`}
-                      style={{
-                        ...(viewMode === "list" && {
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
-                        }),
-                      }}
+                    {/* Page thumbnail wrapper */}
+                    <div
+                      className={`relative overflow-hidden ${
+                        viewMode === "grid" ? "aspect-[3/4]" : "w-24 h-32 flex-shrink-0"
+                      }`}
                     >
-                      {/* Page thumbnail wrapper */}
-                      <div
-                        className={`relative overflow-hidden ${
-                          viewMode === "grid" ? "aspect-[3/4]" : "w-24 h-32 flex-shrink-0"
-                        }`}
-                      >
-                        {/* PDF page image with rotation — lazy loaded for performance */}
-                        <img
-                          src={page.dataUrl}
-                          alt={`Page ${page.pageNum}`}
-                          className="w-full h-full object-contain"
-                          loading="lazy"
-                          decoding="async"
-                          style={{
-                            transform: rotation ? `rotate(${rotation}deg)` : undefined,
-                            transition: "transform 0.3s ease",
-                          }}
-                        />
+                      {/* PDF page image with rotation */}
+                      <img
+                        src={page.dataUrl}
+                        alt={`Page ${page.pageNum}`}
+                        className="w-full h-full object-contain"
+                        style={{
+                          transform: rotation ? `rotate(${rotation}deg)` : undefined,
+                          transition: "transform 0.3s ease",
+                        }}
+                      />
 
-                        {/* Watermark overlay */}
-                        {watermarkStyle && watermarkStyle.text && (
-                          <div
-                            className="absolute inset-0 flex items-center justify-center pointer-events-none"
-                            style={{ opacity: watermarkStyle.opacity }}
-                          >
-                            <span
-                              className="font-bold whitespace-nowrap select-none"
-                              style={{
-                                fontSize: `${watermarkStyle.fontSize}px`,
-                                color: `${watermarkStyle.rgba}${watermarkStyle.opacity})`,
-                                transform: `rotate(${watermarkStyle.rotation}deg)`,
-                                textShadow: "1px 1px 2px rgba(255,255,255,0.5)",
-                              }}
-                            >
-                              {watermarkStyle.text}
-                            </span>
-                          </div>
-                        )}
-
-                        {/* Signature overlay — type, draw, and upload modes */}
-                        {signStyle && (() => {
-                          const isOnThisPage = !signStyle.page || signStyle.page === page.pageNum;
-                          if (!isOnThisPage) return null;
-
-                          const hasTypedName = signStyle.signType === "type" && signStyle.name;
-                          const hasSignatureImage = (signStyle.signType === "draw" || signStyle.signType === "upload") && signStyle.signatureData;
-                          if (!hasTypedName && !hasSignatureImage) return null;
-
-                          // Position mapping
-                          const posMap: Record<string, string> = {
-                            "bottom-right": "bottom-3 right-3 items-end justify-end",
-                            "bottom-left": "bottom-3 left-3 items-end justify-start",
-                            "bottom-center": "bottom-3 left-1/2 -translate-x-1/2 items-end justify-center",
-                            "top-right": "top-3 right-3 items-start justify-end",
-                            "top-left": "top-3 left-3 items-start justify-start",
-                            "top-center": "top-3 left-1/2 -translate-x-1/2 items-start justify-center",
-                          };
-                          const posClass = posMap[signStyle.position] || posMap["bottom-right"];
-
-                          // Font map for typed signatures (using next/font CSS variables)
-                          const fontMap: Record<string, string> = {
-                            georgia: "Georgia, serif",
-                            palatino: "'Palatino Linotype', 'Book Antiqua', Palatino, serif",
-                            dancing: "var(--font-dancing), cursive",
-                            greatvibes: "var(--font-greatvibes), cursive",
-                            kalam: "var(--font-kalam), cursive",
-                            parisienne: "var(--font-parisienne), cursive",
-                            caveat: "var(--font-caveat), cursive",
-                          };
-
-                          return (
-                            <div className={`absolute inset-0 flex ${posClass} pointer-events-none p-2`}>
-                              {hasTypedName ? (
-                                <div className="flex flex-col items-center">
-                                  <span
-                                    style={{
-                                      fontFamily: fontMap[signStyle.signFont] || "Georgia, serif",
-                                      fontSize: `${Math.max(signStyle.signFontSize * 0.4, 14)}px`,
-                                      color: signStyle.signColor,
-                                      fontStyle: "italic",
-                                      textShadow: "0 1px 2px rgba(255,255,255,0.8)",
-                                    }}
-                                  >
-                                    {signStyle.name}
-                                  </span>
-                                  <div
-                                    className="mt-0.5"
-                                    style={{
-                                      width: `${Math.max(signStyle.signFontSize * 0.9, 50)}px`,
-                                      height: "1px",
-                                      backgroundColor: signStyle.signColor + "88",
-                                    }}
-                                  />
-                                </div>
-                              ) : hasSignatureImage ? (
-                                <img
-                                  src={signStyle.signatureData}
-                                  alt="Signature preview"
-                                  className="object-contain"
-                                  loading="lazy"
-                                  style={{
-                                    maxWidth: `${Math.max(signStyle.sigImageSize * 0.4, 60)}px`,
-                                    maxHeight: `${Math.max(signStyle.sigImageSize * 0.4, 60)}px`,
-                                    opacity: 0.95,
-                                    filter: "drop-shadow(0 1px 2px rgba(255,255,255,0.8))",
-                                  }}
-                                />
-                              ) : null}
-                            </div>
-                          );
-                        })()}
-
-                        {/* Page number overlay */}
-                        {pageNumStyle && (
-                          <div
-                            className="absolute inset-0 flex pointer-events-none select-none"
+                      {/* Watermark overlay */}
+                      {watermarkStyle && watermarkStyle.text && (
+                        <div
+                          className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                          style={{ opacity: watermarkStyle.opacity }}
+                        >
+                          <span
+                            className="font-bold whitespace-nowrap select-none"
                             style={{
-                              alignItems:
-                                pageNumStyle.position.includes("bottom")
-                                  ? "flex-end"
-                                  : "flex-start",
-                              justifyContent: pageNumStyle.position.includes("center")
-                                ? "center"
-                                : pageNumStyle.position.includes("right")
-                                ? "flex-end"
-                                : "flex-start",
-                              padding: "8px 12px",
+                              fontSize: `${watermarkStyle.fontSize}px`,
+                              color: `${watermarkStyle.rgba}${watermarkStyle.opacity})`,
+                              transform: `rotate(${watermarkStyle.rotation}deg)`,
+                              textShadow: "1px 1px 2px rgba(255,255,255,0.5)",
                             }}
                           >
-                            <span
-                              className="text-gray-500 dark:text-gray-400 font-medium bg-white/80 dark:bg-zinc-800/80 px-1.5 py-0.5 rounded text-center"
-                              style={{ fontSize: `${Math.min(pageNumStyle.fontSize, 14)}px` }}
-                            >
-                              {pageNumStyle.text}
-                            </span>
-                          </div>
-                        )}
-
-                        {/* Organize: blank page indicator */}
-                        {toolId === "organize-pdf" &&
-                          organizeMode?.mode === "insert" &&
-                          organizeMode.blankPos === page.pageNum && (
-                            <div className="absolute inset-0 border-2 border-dashed border-violet-400 bg-violet-50/40 dark:bg-violet-950/30 flex items-center justify-center">
-                              <span className="text-xs text-violet-500 font-medium bg-white/90 dark:bg-zinc-900/90 px-2 py-1 rounded">
-                                + Blank
-                              </span>
-                            </div>
-                          )}
-
-                        {/* Page number badge */}
-                        <div className="absolute top-1.5 left-1.5">
-                          <span className="text-[10px] font-bold bg-black/60 text-white px-1.5 py-0.5 rounded">
-                            {page.pageNum}
+                            {watermarkStyle.text}
                           </span>
                         </div>
+                      )}
 
-                        {/* Rotate indicator */}
-                        {rotation > 0 && (
-                          <div className="absolute top-1.5 right-1.5">
-                            <span className="text-[10px] font-bold bg-primary/80 text-white px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                              <RotateCw className="w-2.5 h-2.5" />
-                              {rotation}&deg;
+                      {/* Signature overlay — type, draw, and upload modes */}
+                      {signStyle && (() => {
+                        const isOnThisPage = !signStyle.page || signStyle.page === page.pageNum;
+                        if (!isOnThisPage) return null;
+
+                        const hasTypedName = signStyle.signType === "type" && signStyle.name;
+                        const hasSignatureImage = (signStyle.signType === "draw" || signStyle.signType === "upload") && signStyle.signatureData;
+                        if (!hasTypedName && !hasSignatureImage) return null;
+
+                        // Position mapping
+                        const posMap: Record<string, string> = {
+                          "bottom-right": "bottom-3 right-3 items-end justify-end",
+                          "bottom-left": "bottom-3 left-3 items-end justify-start",
+                          "bottom-center": "bottom-3 left-1/2 -translate-x-1/2 items-end justify-center",
+                          "top-right": "top-3 right-3 items-start justify-end",
+                          "top-left": "top-3 left-3 items-start justify-start",
+                          "top-center": "top-3 left-1/2 -translate-x-1/2 items-start justify-center",
+                        };
+                        const posClass = posMap[signStyle.position] || posMap["bottom-right"];
+
+                        // Font map for typed signatures (using next/font CSS variables)
+                        const fontMap: Record<string, string> = {
+                          georgia: "Georgia, serif",
+                          palatino: "'Palatino Linotype', 'Book Antiqua', Palatino, serif",
+                          dancing: "var(--font-dancing), cursive",
+                          greatvibes: "var(--font-greatvibes), cursive",
+                          kalam: "var(--font-kalam), cursive",
+                          parisienne: "var(--font-parisienne), cursive",
+                          caveat: "var(--font-caveat), cursive",
+                        };
+
+                        return (
+                          <div className={`absolute inset-0 flex ${posClass} pointer-events-none p-2`}>
+                            {hasTypedName ? (
+                              <div className="flex flex-col items-center">
+                                <span
+                                  style={{
+                                    fontFamily: fontMap[signStyle.signFont] || "Georgia, serif",
+                                    fontSize: `${Math.max(signStyle.signFontSize * 0.4, 14)}px`,
+                                    color: signStyle.signColor,
+                                    fontStyle: "italic",
+                                    textShadow: "0 1px 2px rgba(255,255,255,0.8)",
+                                  }}
+                                >
+                                  {signStyle.name}
+                                </span>
+                                <div
+                                  className="mt-0.5"
+                                  style={{
+                                    width: `${Math.max(signStyle.signFontSize * 0.9, 50)}px`,
+                                    height: "1px",
+                                    backgroundColor: signStyle.signColor + "88",
+                                  }}
+                                />
+                              </div>
+                            ) : hasSignatureImage ? (
+                              <img
+                                src={signStyle.signatureData}
+                                alt="Signature preview"
+                                className="object-contain"
+                                style={{
+                                  maxWidth: `${Math.max(signStyle.sigImageSize * 0.4, 60)}px`,
+                                  maxHeight: `${Math.max(signStyle.sigImageSize * 0.4, 60)}px`,
+                                  opacity: 0.95,
+                                  filter: "drop-shadow(0 1px 2px rgba(255,255,255,0.8))",
+                                }}
+                              />
+                            ) : null}
+                          </div>
+                        );
+                      })()}
+
+                      {/* Page number overlay */}
+                      {pageNumStyle && (
+                        <div
+                          className="absolute inset-0 flex pointer-events-none select-none"
+                          style={{
+                            alignItems:
+                              pageNumStyle.position.includes("bottom")
+                                ? "flex-end"
+                                : "flex-start",
+                            justifyContent: pageNumStyle.position.includes("center")
+                              ? "center"
+                              : pageNumStyle.position.includes("right")
+                              ? "flex-end"
+                              : "flex-start",
+                            padding: "8px 12px",
+                          }}
+                        >
+                          <span
+                            className="text-gray-500 dark:text-gray-400 font-medium bg-white/80 dark:bg-zinc-800/80 px-1.5 py-0.5 rounded text-center"
+                            style={{ fontSize: `${Math.min(pageNumStyle.fontSize, 14)}px` }}
+                          >
+                            {pageNumStyle.text}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Organize: blank page indicator */}
+                      {toolId === "organize-pdf" &&
+                        organizeMode?.mode === "insert" &&
+                        organizeMode.blankPos === page.pageNum && (
+                          <div className="absolute inset-0 border-2 border-dashed border-violet-400 bg-violet-50/40 dark:bg-violet-950/30 flex items-center justify-center">
+                            <span className="text-xs text-violet-500 font-medium bg-white/90 dark:bg-zinc-900/90 px-2 py-1 rounded">
+                              + Blank
                             </span>
                           </div>
                         )}
+
+                      {/* Page number badge */}
+                      <div className="absolute top-1.5 left-1.5">
+                        <span className="text-[10px] font-bold bg-black/60 text-white px-1.5 py-0.5 rounded">
+                          {page.pageNum}
+                        </span>
                       </div>
 
-                      {/* Page info (list mode) */}
-                      {viewMode === "list" && (
-                        <div className="flex-1 p-3 min-w-0">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium">Page {page.pageNum}</span>
-                            <span className="text-[10px] text-muted-foreground">
-                              {Math.round(page.originalWidth)} &times; {Math.round(page.originalHeight)} pt
-                            </span>
-                          </div>
+                      {/* Rotate indicator */}
+                      {rotation > 0 && (
+                        <div className="absolute top-1.5 right-1.5">
+                          <span className="text-[10px] font-bold bg-primary/80 text-white px-1.5 py-0.5 rounded flex items-center gap-0.5">
+                            <RotateCw className="w-2.5 h-2.5" />
+                            {rotation}&deg;
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Page info (list mode) */}
+                    {viewMode === "list" && (
+                      <div className="flex-1 p-3 min-w-0">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium">Page {page.pageNum}</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {Math.round(page.originalWidth)} &times; {Math.round(page.originalHeight)} pt
+                          </span>
+                        </div>
+                        {splitGroup && (
+                          <Badge variant="secondary" className={`text-[10px] mt-1 ${splitGroup.color}`}>
+                            {splitGroup.label}
+                          </Badge>
+                        )}
+                        {isOrganizeSelected && (
+                          <Badge variant="secondary" className="text-[10px] mt-1 text-amber-600">
+                            {organizeMode?.mode === "delete"
+                              ? "Will be deleted"
+                              : organizeMode?.mode === "extract"
+                              ? "Will be extracted"
+                              : "Selected"}
+                          </Badge>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Grid mode info */}
+                    {viewMode === "grid" && (
+                      <div className="px-2 py-1.5 border-t border-border/50">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-medium text-muted-foreground">
+                            Page {page.pageNum}
+                          </span>
                           {splitGroup && (
-                            <Badge variant="secondary" className={`text-[10px] mt-1 ${splitGroup.color}`}>
+                            <span className={`text-[9px] ${splitGroup.color}`}>
                               {splitGroup.label}
-                            </Badge>
+                            </span>
                           )}
                           {isOrganizeSelected && (
-                            <Badge variant="secondary" className="text-[10px] mt-1 text-amber-600">
-                              {organizeMode?.mode === "delete"
-                                ? "Will be deleted"
-                                : organizeMode?.mode === "extract"
-                                ? "Will be extracted"
-                                : "Selected"}
-                            </Badge>
+                            <span className="text-[9px] text-amber-600 font-medium">Selected</span>
                           )}
                         </div>
-                      )}
-
-                      {/* Grid mode info */}
-                      {viewMode === "grid" && (
-                        <div className="px-2 py-1.5 border-t border-border/50">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-medium text-muted-foreground">
-                              Page {page.pageNum}
-                            </span>
-                            {splitGroup && (
-                              <span className={`text-[9px] ${splitGroup.color}`}>
-                                {splitGroup.label}
-                              </span>
-                            )}
-                            {isOrganizeSelected && (
-                              <span className="text-[9px] text-amber-600 font-medium">Selected</span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </motion.div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Load More button for large PDFs */}
-            {hasMorePages && (
-              <div className="px-4 py-3 border-t flex items-center justify-center">
-                <button
-                  onClick={handleLoadAllPages}
-                  disabled={isExpanding}
-                  className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isExpanding ? (
-                    <motion.div
-                      animate={{ rotate: 360 }}
-                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                      className="w-4 h-4 rounded-full border-2 border-muted border-t-primary"
-                    />
-                  ) : (
-                    <ChevronDown className="w-4 h-4" />
-                  )}
-                  {isExpanding
-                    ? `Rendering ${totalPdfPageCount - totalPages} more pages...`
-                    : `Show All ${totalPdfPageCount} Pages (${totalPdfPageCount - totalPages} remaining)`}
-                </button>
-              </div>
-            )}
+                      </div>
+                    )}
+                  </motion.div>
+                );
+              })}
+            </div>
 
             {/* Page navigation for sign-pdf */}
             {totalPages > 1 && toolId === "sign-pdf" && (

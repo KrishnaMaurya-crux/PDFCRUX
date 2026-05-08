@@ -1,17 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, Cloud } from "lucide-react";
 import { pickFromGoogleDrive } from "@/lib/google-drive";
 import { getIsGoogleDriveReady } from "@/lib/google-drive";
-import { pickFromDropbox } from "@/lib/dropbox";
-import { getIsDropboxReady } from "@/lib/dropbox";
 import { useToast } from "@/hooks/use-toast";
 
 interface CloudStorageButtonsProps {
   mode: "upload" | "download";
   onFilesSelected?: (files: File[]) => void;
-  onCloudSave?: (provider: "google-drive" | "dropbox") => void;
+  onCloudSave?: (provider: "google-drive") => void;
   acceptTypes?: string;
   className?: string;
 }
@@ -30,19 +28,6 @@ function GoogleDriveLogo() {
   );
 }
 
-// ── Official Dropbox SVG logo (open box, all #0061FF) ──────────────
-function DropboxLogo() {
-  return (
-    <svg viewBox="0 0 94 78" className="w-9 h-9" xmlns="http://www.w3.org/2000/svg">
-      <path d="m47 24.5-23.5-13.5-23.5 13.5 23.5 13.5z" fill="#0061FF" />
-      <path d="m0 28.5v26l23.5 13.5v-26z" fill="#0061FF" />
-      <path d="m47 57.5v26l23.5-13.5v-26z" fill="#0061FF" />
-      <path d="m94 28.5-23.5-13.5-23.5 13.5v26l23.5-13.5 23.5-13.5z" fill="#0061FF" />
-      <path d="m47 51.5 23.5 13.5v-26l-23.5 13.5z" fill="#0061FF" />
-    </svg>
-  );
-}
-
 function isValidFile(file: unknown): file is File {
   return file instanceof File && file.name.trim().length > 0 && file.size > 0;
 }
@@ -52,7 +37,7 @@ export default function CloudStorageButtons({
   onFilesSelected,
   onCloudSave,
 }: CloudStorageButtonsProps) {
-  const [loading, setLoading] = useState<"google-drive" | "dropbox" | null>(null);
+  const [loading, setLoading] = useState<"google-drive" | null>(null);
   const { toast } = useToast();
 
   // ── Google Drive handler ──
@@ -65,11 +50,11 @@ export default function CloudStorageButtons({
       return;
     }
 
-    // Runtime config check (NOT stale module-level constant)
+    // Runtime config check
     if (!getIsGoogleDriveReady()) {
       toast({
         title: "Google Drive not configured",
-        description: "Set NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID and API_KEY in Vercel env vars.",
+        description: "Set NEXT_PUBLIC_GOOGLE_DRIVE_CLIENT_ID and API_KEY in env vars.",
         variant: "destructive",
       });
       return;
@@ -82,7 +67,6 @@ export default function CloudStorageButtons({
       console.log("[CloudButtons] pickFromGoogleDrive returned:", files.length, "files");
 
       if (files.length === 0) {
-        // Cancelled or no files — silently ignore
         console.log("[CloudButtons] No files returned (user cancelled or no selection).");
         return;
       }
@@ -103,7 +87,6 @@ export default function CloudStorageButtons({
     } catch (err) {
       console.error("[CloudButtons] Google Drive error:", err);
       const msg = err instanceof Error ? err.message : "Failed to import from Google Drive";
-      // Don't show toast for cancel/timeout
       if (
         !msg.toLowerCase().includes("cancel") &&
         !msg.toLowerCase().includes("timed out")
@@ -111,66 +94,7 @@ export default function CloudStorageButtons({
         toast({ title: "Google Drive error", description: msg, variant: "destructive" });
       }
     } finally {
-      console.log("[CloudButtons] Resetting Google Drive loading state.");
-      setLoading(null);
-    }
-  };
-
-  // ── Dropbox handler ──
-  const handleDropbox = async () => {
-    if (loading) return;
-
-    // Download mode: delegate to parent
-    if (mode === "download") {
-      onCloudSave?.("dropbox");
-      return;
-    }
-
-    // Runtime config check (NOT stale module-level constant)
-    if (!getIsDropboxReady()) {
-      toast({
-        title: "Dropbox not configured",
-        description: "Set NEXT_PUBLIC_DROPBOX_APP_KEY in Vercel env vars.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setLoading("dropbox");
-    try {
-      console.log("[CloudButtons] Calling pickFromDropbox...");
-      const files = await pickFromDropbox();
-      console.log("[CloudButtons] pickFromDropbox returned:", files.length, "files");
-
-      if (files.length === 0) {
-        console.log("[CloudButtons] No files returned (user cancelled or no selection).");
-        return;
-      }
-
-      const valid = files.filter(isValidFile);
-      console.log("[CloudButtons] Valid files:", valid.length);
-
-      if (valid.length > 0) {
-        console.log("[CloudButtons] Calling onFilesSelected with:", valid.map((f) => f.name));
-        onFilesSelected?.(valid);
-      } else {
-        toast({
-          title: "No valid files",
-          description: "Selected files were empty or invalid.",
-          variant: "destructive",
-        });
-      }
-    } catch (err) {
-      console.error("[CloudButtons] Dropbox error:", err);
-      const msg = err instanceof Error ? err.message : "Failed to import from Dropbox";
-      if (
-        !msg.toLowerCase().includes("cancel") &&
-        !msg.toLowerCase().includes("timed out")
-      ) {
-        toast({ title: "Dropbox error", description: msg, variant: "destructive" });
-      }
-    } finally {
-      console.log("[CloudButtons] Resetting Dropbox loading state.");
+      console.log("[CloudButtons] Resetting loading state.");
       setLoading(null);
     }
   };
@@ -180,7 +104,7 @@ export default function CloudStorageButtons({
 
   return (
     <div className="flex items-center gap-4">
-      {/* Google Drive — ALWAYS visible */}
+      {/* Google Drive */}
       <button
         type="button"
         onClick={handleGoogleDrive}
@@ -192,21 +116,6 @@ export default function CloudStorageButtons({
           <Loader2 className="w-7 h-7 animate-spin text-blue-500" />
         ) : (
           <GoogleDriveLogo />
-        )}
-      </button>
-
-      {/* Dropbox — ALWAYS visible */}
-      <button
-        type="button"
-        onClick={handleDropbox}
-        disabled={loading !== null}
-        title={mode === "download" ? "Save to Dropbox" : "Import from Dropbox"}
-        className={`${btnBase} hover:border-[#0061FF] hover:shadow-blue-200/50`}
-      >
-        {loading === "dropbox" ? (
-          <Loader2 className="w-7 h-7 animate-spin text-[#0061FF]" />
-        ) : (
-          <DropboxLogo />
         )}
       </button>
     </div>

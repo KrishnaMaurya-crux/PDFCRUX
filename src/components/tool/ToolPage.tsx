@@ -42,7 +42,7 @@ import {
 } from "@/lib/pdf-processor";
 import CloudStorageButtons from "@/components/tool/CloudStorageButtons";
 import { saveToGoogleDrive } from "@/lib/google-drive";
-import { saveToDropbox } from "@/lib/dropbox";
+
 
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -278,12 +278,14 @@ export default function ToolPage() {
     isProcessing,
     isComplete,
     processingProgress,
+    processingStatus,
     navigateHome,
     addFiles,
     removeFile,
     clearFiles,
     startProcessing,
     setProcessingProgress,
+    setProcessingStatus,
     completeProcessing,
     resetTool,
   } = useAppStore();
@@ -376,21 +378,30 @@ export default function ToolPage() {
     setCurrentStep(0);
     setProcessResult(null);
 
+    // Determine if this tool supports real progress (format converters)
+    const formatTools = [
+      "jpg-to-pdf", "pdf-to-jpg", "pdf-to-word", "pdf-to-excel",
+      "word-to-pdf", "excel-to-pdf", "powerpoint-to-pdf"
+    ];
+    const isFormatTool = formatTools.includes(selectedToolId);
+
+    // For non-format tools, use fake progress animation
     const steps = config.processingSteps || ["Processing..."];
     const stepSize = 100 / steps.length;
-
-    // Start progress animation
     let progress = 0;
-    progressIntervalRef.current = setInterval(() => {
-      progress += Math.random() * 5 + 1;
-      if (progress > 90) progress = 90; // Cap at 90 until actual processing completes
-      const stepIndex = Math.min(
-        Math.floor(progress / stepSize),
-        steps.length - 1
-      );
-      setCurrentStep(stepIndex);
-      setProcessingProgress(Math.min(progress, 90));
-    }, 300);
+
+    if (!isFormatTool) {
+      progressIntervalRef.current = setInterval(() => {
+        progress += Math.random() * 5 + 1;
+        if (progress > 90) progress = 90;
+        const stepIndex = Math.min(
+          Math.floor(progress / stepSize),
+          steps.length - 1
+        );
+        setCurrentStep(stepIndex);
+        setProcessingProgress(Math.min(progress, 90));
+      }, 300);
+    }
 
     try {
       // Do the actual processing
@@ -399,7 +410,19 @@ export default function ToolPage() {
         uploadedFiles,
         optionValues,
         compareFileA,
-        compareFileB
+        compareFileB,
+        isFormatTool
+          ? (status: string, percent: number) => {
+              setProcessingStatus(status);
+              setProcessingProgress(percent);
+              // Update step based on progress
+              const stepIndex = Math.min(
+                Math.floor(percent / stepSize),
+                steps.length - 1
+              );
+              setCurrentStep(stepIndex);
+            }
+          : undefined
       );
 
       setProcessResult(result);
@@ -409,6 +432,7 @@ export default function ToolPage() {
         clearInterval(progressIntervalRef.current);
       setCurrentStep(steps.length - 1);
       setProcessingProgress(100);
+      setProcessingStatus("Complete!");
       completeProcessing();
 
       if (result.success) {
@@ -453,6 +477,13 @@ export default function ToolPage() {
     };
   }, []);
 
+  // Scroll to top when processing completes — result should be visible at top
+  useEffect(() => {
+    if (isComplete) {
+      window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+    }
+  }, [isComplete]);
+
   if (!tool || !selectedToolId || !config) return null;
 
   const handleDrop = (e: React.DragEvent) => {
@@ -470,7 +501,7 @@ export default function ToolPage() {
     });
   };
 
-  const handleCloudSave = async (provider: "google-drive" | "dropbox") => {
+  const handleCloudSave = async (provider: "google-drive") => {
     const result = processResult;
     if (!result || !result.success || result.outputFiles.length === 0) {
       toast({
@@ -483,20 +514,16 @@ export default function ToolPage() {
     // Use first output file for cloud save
     const outputFile = result.outputFiles[0];
     try {
-      if (provider === "google-drive") {
-        await saveToGoogleDrive(outputFile.data, outputFile.name);
-      } else {
-        await saveToDropbox(outputFile.data, outputFile.name);
-      }
+      await saveToGoogleDrive(outputFile.data, outputFile.name);
       toast({
-        title: "Saved to cloud",
-        description: `${outputFile.name} saved to ${provider === "google-drive" ? "Google Drive" : "Dropbox"}`,
+        title: "Saved to Google Drive",
+        description: `${outputFile.name} saved successfully`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       if (!msg.includes("cancel") && !msg.includes("Cancel")) {
         toast({
-          title: `Save to ${provider === "google-drive" ? "Google Drive" : "Dropbox"} failed`,
+          title: "Save to Google Drive failed",
           description: msg,
           variant: "destructive",
         });
@@ -1024,7 +1051,9 @@ export default function ToolPage() {
               <div className="max-w-md mx-auto">
                 <Progress value={processingProgress} className="h-2 mb-2" />
                 <p className="text-sm text-muted-foreground">
-                  {Math.round(processingProgress)}% complete
+                  {processingStatus
+                    ? processingStatus
+                    : `${Math.round(processingProgress)}% complete`}
                 </p>
               </div>
             </motion.div>
