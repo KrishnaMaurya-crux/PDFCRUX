@@ -12,6 +12,7 @@
  */
 
 import type { ResumeSection, SectionDetectionResult } from "./types";
+export type { ResumeSection, SectionDetectionResult } from "./types";
 
 /** The 4 key sections to detect, with their regex patterns. */
 const KEY_SECTIONS: { name: string; patterns: RegExp[] }[] = [

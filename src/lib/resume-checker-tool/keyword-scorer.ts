@@ -12,6 +12,7 @@
  */
 
 import type { KeywordMatchResult } from "./types";
+export type { KeywordMatchResult } from "./types";
 
 /** Comprehensive ATS keyword pool. */
 const ATS_KEYWORDS: string[] = [

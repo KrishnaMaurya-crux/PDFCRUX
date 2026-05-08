@@ -7,6 +7,7 @@
 
 import type { TextItem } from "pdfjs-dist/types/src/display/api";
 import type { ExtractionResult } from "./types";
+export type { ExtractionResult } from "./types";
 
 /**
  * Extract full text from a PDF file.

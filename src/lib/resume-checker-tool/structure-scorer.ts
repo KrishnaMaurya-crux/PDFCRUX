@@ -10,6 +10,7 @@
  */
 
 import type { StructureCheckResult } from "./types";
+export type { StructureCheckResult } from "./types";
 
 /**
  * Check the structural quality of a resume.

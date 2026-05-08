@@ -11,6 +11,7 @@
  */
 
 import type { LengthCheckResult } from "./types";
+export type { LengthCheckResult } from "./types";
 
 /**
  * Count words in a text string.
