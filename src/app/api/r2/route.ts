@@ -77,7 +77,7 @@ export async function GET(request: NextRequest) {
       zip: "application/zip",
     };
 
-    return new NextResponse(buffer, {
+    return new NextResponse(new Uint8Array(buffer), {
       headers: {
         "Content-Type": contentTypes[ext || ""] || "application/octet-stream",
         "Content-Disposition": `inline; filename="${key.split("/").pop()}"`,
