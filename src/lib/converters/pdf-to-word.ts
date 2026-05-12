@@ -150,7 +150,8 @@ type PdfDoc = Awaited<ReturnType<typeof loadPdf>>;
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════
 
-const OCR_FREE_KEY = "K87397566888957";
+// API key is now server-side only (.env.local → OCR_SPACE_API_KEY)
+// No hardcoded keys in client code
 const MAX_OCR_IMAGE_SIZE = 900 * 1024; // 900 KB
 const OCR_DPI_LEVELS = [300, 250, 200, 150, 100, 72];
 const OCR_JPEG_QUALITIES = [0.85, 0.7, 0.55, 0.4];
@@ -313,10 +314,10 @@ async function blobToBase64(blob: Blob): Promise<string> {
 
 /**
  * Call our server-side OCR.space proxy API.
+ * API key is handled server-side — we only send the image and language.
  */
 async function callOcrSpaceApi(
   base64Image: string,
-  apiKey: string,
   language: string
 ): Promise<OcrResult> {
   const response = await fetch("/api/ocr-space", {
@@ -324,7 +325,6 @@ async function callOcrSpaceApi(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       base64Image,
-      apiKey,
       language,
     }),
   });
@@ -1514,7 +1514,6 @@ export async function convertPdfToWord(
   file: File,
   options: {
     useOcrSpace: boolean;
-    ocrApiKey: string;
     layoutMode: "single" | "keep" | "auto";
     ocrLanguage: string;
     enableOcr: boolean;
@@ -1523,10 +1522,6 @@ export async function convertPdfToWord(
 ): Promise<{ file: OutputFile; stats: ConversionStats }> {
   const startTime = Date.now();
   const baseName = file.name.replace(/\.[^/.]+$/, "");
-  const apiKey =
-    options.ocrApiKey && options.ocrApiKey.trim() !== ""
-      ? options.ocrApiKey.trim()
-      : OCR_FREE_KEY;
 
   // ── Phase 1: Load & Analyze (0-10%) ──────────────────────────────────
   onProgress?.("Loading PDF...", 2);
@@ -1588,7 +1583,7 @@ export async function convertPdfToWord(
         onProgress?.(`Calling OCR.space for page ${pageNum}...`, pagePercent + 4);
 
         // Sequential API call
-        const ocrResult = await callOcrSpaceApi(base64, apiKey, options.ocrLanguage);
+        const ocrResult = await callOcrSpaceApi(base64, options.ocrLanguage);
         blocks = ocrWordsToTextBlocks(ocrResult, pageNum);
 
         if (blocks.length > 0) {
