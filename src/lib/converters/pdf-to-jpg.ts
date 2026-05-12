@@ -2,7 +2,8 @@
  * PDF to JPG Converter for PdfCrux
  *
  * High-fidelity PDF rendering using pdfjs-dist with configurable DPI,
- * page range selection, ZIP output for multi-page, and progress callbacks.
+ * page range selection, ZIP output for multi-page, vertical stitching
+ * for combined mode, and real-time progress callbacks.
  * All processing runs client-side in the browser.
  */
 
@@ -24,7 +25,6 @@ export interface ConversionStats {
   convertedPages: number;
   outputSize: number;
   dpi: number;
-  quality: "high" | "medium" | "low";
   format: "jpg" | "zip";
   conversionTimeMs: number;
 }
@@ -32,6 +32,8 @@ export interface ConversionStats {
 export interface PdfToJpgOptions {
   quality: "high" | "medium" | "low";
   pageRange: string;
+  mode: "separate" | "combined";
+  dpi: number;
 }
 
 // ========================
@@ -39,9 +41,9 @@ export interface PdfToJpgOptions {
 // ========================
 
 const DPI_MAP: Record<PdfToJpgOptions["quality"], number> = {
-  high: 300,   // Adobe-quality print resolution
-  medium: 200, // Good quality for screen / sharing
-  low: 150,    // Compact / fast preview
+  high: 300,
+  medium: 200,
+  low: 150,
 };
 
 const JPEG_QUALITY = 0.92;
@@ -50,48 +52,26 @@ const JPEG_QUALITY = 0.92;
 // Page Range Parser
 // ========================
 
-/**
- * Parses a human-readable page range string into an array of 0-based page indices.
- *
- * Supported formats:
- *   "1-3,5,7-10"   → pages 1,2,3,5,7,8,9,10
- *   "all"           → all pages
- *   ""              → all pages (empty string default)
- *   "5"             → page 5 only
- *   "1-3"           → pages 1,2,3
- *
- * Returns sorted array of unique 0-based indices.
- */
 function parsePageRange(input: string, totalPages: number): number[] {
   const trimmed = input.trim().toLowerCase();
-
-  // "all" or empty → return every page
   if (trimmed === "" || trimmed === "all") {
     return Array.from({ length: totalPages }, (_, i) => i);
   }
-
   const indices = new Set<number>();
   const parts = trimmed.split(",");
-
   for (const part of parts) {
     const p = part.trim();
     if (!p) continue;
-
     if (p.includes("-")) {
       const [startStr, endStr] = p.split("-").map((s) => s.trim());
       const start = Math.max(1, parseInt(startStr, 10) || 1);
       const end = Math.min(totalPages, parseInt(endStr, 10) || totalPages);
-      for (let i = start; i <= end; i++) {
-        indices.add(i - 1);
-      }
+      for (let i = start; i <= end; i++) indices.add(i - 1);
     } else {
       const num = parseInt(p, 10);
-      if (num >= 1 && num <= totalPages) {
-        indices.add(num - 1);
-      }
+      if (num >= 1 && num <= totalPages) indices.add(num - 1);
     }
   }
-
   return Array.from(indices).sort((a, b) => a - b);
 }
 
@@ -119,15 +99,26 @@ function canvasToJpgBlob(
 }
 
 // ========================
-// File Size Formatter
+// Render a single PDF page to canvas
 // ========================
 
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+async function renderPageToCanvas(
+  pdfDoc: any,
+  pageNum: number,
+  scale: number
+): Promise<HTMLCanvasElement> {
+  const page = await pdfDoc.getPage(pageNum);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get 2D canvas context");
+  ctx.fillStyle = "#FFFFFF";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  page.cleanup();
+  return canvas;
 }
 
 // ========================
@@ -137,10 +128,14 @@ function formatFileSize(bytes: number): string {
 /**
  * Converts a PDF file to JPG image(s).
  *
- * - Single page → returns one JPG blob directly.
- * - Multiple pages → returns a ZIP containing all JPGs.
+ * mode === "separate":
+ *   - 1 page  → single JPG file
+ *   - N pages → ZIP containing N JPG files
  *
- * Progress callback fires at key stages so the UI can show a progress bar.
+ * mode === "combined":
+ *   - All pages stitched vertically into ONE long JPG image
+ *
+ * Progress callback fires per-page so UI shows "Processing Page X of Y".
  */
 export async function convertPdfToJpg(
   file: File,
@@ -148,9 +143,12 @@ export async function convertPdfToJpg(
   onProgress?: (status: string, percent: number) => void
 ): Promise<{ files: OutputFile[]; stats: ConversionStats }> {
   const startTime = performance.now();
+  const baseName = file.name.replace(/\.[^/.]+$/, "");
 
-  // --- Determine DPI ---
-  const dpi = DPI_MAP[options.quality] ?? DPI_MAP.medium;
+  // --- Resolve DPI: prefer explicit DPI option, fall back to quality preset ---
+  const explicitDpi = Number(options.dpi);
+  const dpi = (explicitDpi >= 72 && explicitDpi <= 1200) ? explicitDpi : (DPI_MAP[options.quality] ?? DPI_MAP.medium);
+  const scale = dpi / 72;
 
   // --- Load PDF document ---
   onProgress?.("Loading PDF document...", 0);
@@ -161,13 +159,12 @@ export async function convertPdfToJpg(
   const arrayBuffer = await file.arrayBuffer();
   const pdfData = new Uint8Array(arrayBuffer);
 
-  const loadingTask = pdfjsLib.getDocument({
-    data: pdfData.slice(0), // slice to avoid detached buffer issues
+  const pdfDoc = await pdfjsLib.getDocument({
+    data: pdfData.slice(0),
     disableAutoFetch: true,
     disableStream: true,
-  });
+  }).promise;
 
-  const pdfDoc = await loadingTask.promise;
   const totalPages = pdfDoc.numPages;
 
   // --- Parse page range ---
@@ -181,99 +178,121 @@ export async function convertPdfToJpg(
   }
 
   onProgress?.(
-    `Parsed page range: ${convertedPages} of ${totalPages} page(s) selected`,
-    2
+    `${convertedPages} of ${totalPages} page(s) selected at ${dpi} DPI`,
+    3
   );
 
-  // --- Render each page ---
-  const scale = dpi / 72;
-  const baseName = file.name.replace(/\.[^/.]+$/, "");
-  const renderedBlobs: OutputFile[] = [];
+  // --- Render all pages to canvases ---
+  const canvases: HTMLCanvasElement[] = [];
 
   for (let i = 0; i < convertedPages; i++) {
     const pageIdx = pageIndices[i];
-    const pageNum = pageIdx + 1; // 1-based for display
+    const pageNum = pageIdx + 1;
 
+    const pctRange = convertedPages > 1 ? 85 : 80;
     onProgress?.(
-      `Rendering page ${pageNum} of ${convertedPages}...`,
-      Math.round((2 + (i / convertedPages) * 88)) // 2% → 90% range
+      `Processing page ${pageNum} of ${convertedPages}...`,
+      Math.round(3 + (i / convertedPages) * pctRange)
     );
 
-    // Get page and viewport
-    const page = await pdfDoc.getPage(pageNum);
-    const viewport = page.getViewport({ scale });
-
-    // Create offscreen canvas
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.floor(viewport.width);
-    canvas.height = Math.floor(viewport.height);
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      throw new Error("Could not get 2D canvas context");
-    }
-
-    // White background (PDFs can have transparent backgrounds)
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Render page onto canvas
-    await page.render({
-      canvasContext: ctx,
-      viewport,
-    }).promise;
-
-    // Convert to JPEG blob
-    const jpgBlob = await canvasToJpgBlob(canvas, JPEG_QUALITY);
-
-    renderedBlobs.push({
-      name: `${baseName}_page_${pageNum}.jpg`,
-      data: jpgBlob,
-      size: jpgBlob.size,
-    });
-
-    // Clean up references to free memory
-    page.cleanup();
+    const canvas = await renderPageToCanvas(pdfDoc, pageNum, scale);
+    canvases.push(canvas);
   }
 
-  // --- Prepare output ---
-  onProgress?.("Preparing output...", 92);
+  // --- Prepare output based on mode ---
+  onProgress?.("Preparing output...", 90);
 
   let outputFiles: OutputFile[];
   let format: ConversionStats["format"];
 
-  if (convertedPages === 1) {
-    // Single page → return the JPG directly
-    outputFiles = renderedBlobs;
-    format = "jpg";
-  } else {
-    // Multiple pages → bundle into a ZIP
-    onProgress?.("Creating ZIP archive...", 95);
+  if (options.mode === "combined") {
+    // ============================================================
+    // COMBINED MODE: Vertically stitch all pages into one long JPG
+    // ============================================================
+    onProgress?.("Stitching pages into single image...", 92);
 
-    const zip = new JSZip();
+    // Find max width across all canvases (pages may differ in width)
+    const maxWidth = Math.max(...canvases.map((c) => c.width));
+    // Sum all heights for the vertical stack
+    const totalHeight = canvases.reduce((sum, c) => sum + c.height, 0);
 
-    for (const blob of renderedBlobs) {
-      zip.file(blob.name, blob.data);
+    // Create the mega-canvas
+    const combinedCanvas = document.createElement("canvas");
+    combinedCanvas.width = maxWidth;
+    combinedCanvas.height = totalHeight;
+    const combinedCtx = combinedCanvas.getContext("2d");
+    if (!combinedCtx) throw new Error("Could not get combined canvas context");
+
+    // White background
+    combinedCtx.fillStyle = "#FFFFFF";
+    combinedCtx.fillRect(0, 0, maxWidth, totalHeight);
+
+    // Draw each page vertically, centered horizontally
+    let yOffset = 0;
+    for (const canvas of canvases) {
+      const xOffset = Math.floor((maxWidth - canvas.width) / 2);
+      combinedCtx.drawImage(canvas, xOffset, yOffset);
+      yOffset += canvas.height;
     }
 
-    const zipBlob = await zip.generateAsync({
-      type: "blob",
-      compression: "DEFLATE",
-      compressionOptions: { level: 6 },
-    });
-
-    const zipName = `${baseName}_images.zip`;
+    // Convert combined canvas to JPEG
+    const combinedBlob = await canvasToJpgBlob(combinedCanvas, JPEG_QUALITY);
 
     outputFiles = [
       {
-        name: zipName,
-        data: zipBlob,
-        size: zipBlob.size,
+        name: `${baseName}_combined.jpg`,
+        data: combinedBlob,
+        size: combinedBlob.size,
       },
     ];
-    format = "zip";
+    format = "jpg";
+  } else {
+    // ============================================================
+    // SEPARATE MODE: Individual JPGs, ZIP for multi-page
+    // ============================================================
+    const blobs: OutputFile[] = [];
+
+    for (let i = 0; i < canvases.length; i++) {
+      const pageNum = pageIndices[i] + 1;
+      const jpgBlob = await canvasToJpgBlob(canvases[i], JPEG_QUALITY);
+      blobs.push({
+        name: `${baseName}_page_${pageNum}.jpg`,
+        data: jpgBlob,
+        size: jpgBlob.size,
+      });
+    }
+
+    if (blobs.length === 1) {
+      // Single page → return JPG directly
+      outputFiles = blobs;
+      format = "jpg";
+    } else {
+      // Multiple pages → ZIP
+      onProgress?.("Creating ZIP archive...", 94);
+
+      const zip = new JSZip();
+      for (const blob of blobs) {
+        zip.file(blob.name, blob.data);
+      }
+
+      const zipBlob = await zip.generateAsync({
+        type: "blob",
+        compression: "DEFLATE",
+        compressionOptions: { level: 6 },
+      });
+
+      outputFiles = [
+        {
+          name: `${baseName}_images.zip`,
+          data: zipBlob,
+          size: zipBlob.size,
+        },
+      ];
+      format = "zip";
+    }
   }
 
+  // --- Build stats ---
   const conversionTimeMs = Math.round(performance.now() - startTime);
   const outputSize = outputFiles.reduce((sum, f) => sum + f.size, 0);
 
@@ -283,7 +302,6 @@ export async function convertPdfToJpg(
     convertedPages,
     outputSize,
     dpi,
-    quality: options.quality,
     format,
     conversionTimeMs,
   };
