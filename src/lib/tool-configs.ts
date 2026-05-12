@@ -377,14 +377,6 @@ export const toolConfigs: Record<string, ToolConfig> = {
         hint: "Use OCR.space API for high-accuracy text extraction with position data. Bypasses 3-page limit automatically.",
       },
       {
-        id: "ocr-api-key",
-        label: "OCR.space API Key",
-        type: "input",
-        placeholder: "Enter your free OCR.space API key (or leave blank for built-in key)",
-        defaultValue: "",
-        hint: "Get a free key at ocr.space. Leave blank to use the default key.",
-      },
-      {
         id: "columns",
         label: "Column Handling",
         type: "radio",

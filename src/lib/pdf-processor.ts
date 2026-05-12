@@ -3893,7 +3893,6 @@ export async function processTool(
       try {
         const result = await convertPdfToWord(files[0], {
           useOcrSpace: options["use-ocr-space"] !== false,
-          ocrApiKey: String(options["ocr-api-key"] || ""),
           layoutMode: String(options["columns"] || "auto") as "single" | "keep" | "auto",
           ocrLanguage: String(options["ocr-language"] || "eng"),
           enableOcr: options["ocr"] !== false,
