@@ -6,13 +6,15 @@ import { NextRequest, NextResponse } from "next/server";
  * Server-side proxy for OCR.space API.
  * Needed because OCR.space has CORS restrictions and API keys must stay server-side.
  *
- * Body: { base64Image: string, apiKey: string, language: string }
+ * Body: { base64Image: string, language: string }
  * Returns: OCR.space JSON response with TextOverlay data
+ *
+ * The API key is read from OCR_SPACE_API_KEY env var — NEVER from client input.
  */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { base64Image, apiKey, language = "eng" } = body;
+    const { base64Image, language = "eng" } = body;
 
     if (!base64Image || typeof base64Image !== "string") {
       return NextResponse.json(
@@ -21,8 +23,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Use the built-in fallback key if the user didn't provide one
-    const key = apiKey && apiKey.trim() !== "" ? apiKey.trim() : "K87397566888957";
+    // API key from server-side env ONLY — never trust client-provided keys
+    const key = process.env.OCR_SPACE_API_KEY;
+    if (!key) {
+      console.error("OCR_SPACE_API_KEY is not set in environment variables");
+      return NextResponse.json(
+        { error: "OCR service is not configured. Please contact the administrator." },
+        { status: 500 }
+      );
+    }
 
     // Build the multipart form data manually
     const boundary = `----PdfCruxOCR${Date.now()}`;
