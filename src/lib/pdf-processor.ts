@@ -3856,6 +3856,8 @@ export async function processTool(
         const result = await convertPdfToJpg(files[0], {
           quality: qualityLabel as "high" | "medium" | "low",
           pageRange: String(options["page-range"] || ""),
+          mode: (String(options["mode"] || "separate") === "combined") ? "combined" : "separate",
+          dpi: Number(options["dpi"] || 150),
         }, onProgress);
         // Converter returns Blob data; convert to Uint8Array
         const outputFiles = await Promise.all(
@@ -3870,10 +3872,16 @@ export async function processTool(
           })
         );
 
+        const modeText = result.stats.format === "zip"
+          ? "ZIP archive with separate images"
+          : String(options["mode"] || "separate") === "combined"
+            ? "single combined image"
+            : "JPEG image";
+
         return {
           success: true,
           outputFiles,
-          message: `Converted ${result.stats.convertedPages} page(s) to JPG at ${result.stats.dpi} DPI (${result.stats.format === "zip" ? "ZIP archive" : "JPEG image"})`,
+          message: `Converted ${result.stats.convertedPages} page(s) to JPG at ${result.stats.dpi} DPI (${modeText})`,
           stats: { originalSize: result.stats.originalSize, outputSize: result.stats.outputSize },
         };
       } catch (err) {
@@ -3883,18 +3891,13 @@ export async function processTool(
 
     case "pdf-to-word": {
       try {
-        const detectionMode = String(options["columns"] || "auto");
-        let extractMode: "auto" | "tables" | "full-text";
-        if (detectionMode === "single") extractMode = "full-text";
-        else if (detectionMode === "keep") extractMode = "auto";
-        else extractMode = "auto";
-
         const result = await convertPdfToWord(files[0], {
+          useOcrSpace: options["use-ocr-space"] !== false,
+          ocrApiKey: String(options["ocr-api-key"] || ""),
+          layoutMode: String(options["columns"] || "auto") as "single" | "keep" | "auto",
+          ocrLanguage: String(options["ocr-language"] || "eng"),
           enableOcr: options["ocr"] !== false,
-          preserveLayout: options["preserve-layout"] !== false,
-          language: String(options["ocr-language"] || "eng"),
         }, onProgress);
-        // Converter returns a File object; read as Uint8Array
         const outputData = result.file.file instanceof File
           ? new Uint8Array(await result.file.file.arrayBuffer())
           : new Uint8Array();
@@ -3902,7 +3905,7 @@ export async function processTool(
         return {
           success: true,
           outputFiles: [{ name: result.file.name, data: outputData, size: result.file.size }],
-          message: `Converted ${result.stats.totalPages} pages to Word document (${result.stats.headingsDetected} headings, ${result.stats.totalCharacters.toLocaleString()} characters${result.stats.ocrPages > 0 ? `, ${result.stats.ocrPages} page(s) via OCR` : ""})`,
+          message: `Converted ${result.stats.totalPages} pages to Word (${result.stats.totalCharacters.toLocaleString()} chars${result.stats.ocrPages > 0 ? `, ${result.stats.ocrPages} page(s) via OCR` : ""}, ${result.stats.headingsDetected} headings, ${result.stats.tablesDetected} tables, ${result.stats.imagesExtracted} images)`,
           stats: { originalSize: files[0].size, outputSize: result.file.size },
         };
       } catch (err) {
