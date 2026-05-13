@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft,
@@ -93,7 +93,7 @@ const FREE_PLAN: PricingPlan = {
   features: [
     { text: "12 Non-AI Tokens / month", included: true },
     { text: "3 AI Tokens / month", included: true },
-    { text: "All 20+ PDF Tools", included: true },
+    { text: "All 23+ PDF Tools", included: true },
     { text: "Client-side Processing", included: true },
     { text: "PdfCrux Branding on Invoices", included: true },
     { text: "Bulk Compress (3 files max)", included: true },
@@ -117,10 +117,10 @@ const PREMIUM_PLAN: PricingPlan = {
   features: [
     { text: "Unlimited Non-AI Tokens", included: true },
     { text: "100 AI Tokens / month", included: true },
-    { text: "All 20+ PDF Tools", included: true },
+    { text: "All 23+ PDF Tools", included: true },
     { text: "Client-side Processing", included: true },
     { text: "Remove PdfCrux Branding", included: true },
-    { text: "Bulk Compress (100 files max)", included: true },
+    { text: "Bulk Compress (100 files at once)", included: true },
     { text: "1GB Cloud Storage", included: true },
     { text: "Priority Processing", included: true },
     { text: "30-Day File History", included: true },
@@ -152,7 +152,7 @@ const ENTERPRISE_PLAN: PricingPlan = {
   features: [
     { text: "Unlimited AI & Non-AI Tokens", included: true },
     { text: "Custom Cloud Storage (10GB+)", included: true },
-    { text: "All 20+ PDF Tools", included: true },
+    { text: "All 23+ PDF Tools", included: true },
     { text: "Team Dashboard (Multi-user)", included: true },
     { text: "24/7 Dedicated Support", included: true },
     { text: "Bulk Compress (Unlimited)", included: true },
@@ -216,8 +216,11 @@ const FAQ_ITEMS = [
 // Region Detection
 // ============================================================
 function detectRegion(): Region {
-  // Synchronous fallback — will be overridden by useEffect
-  return "global";
+  try {
+    return "global";
+  } catch {
+    return "global";
+  }
 }
 
 // ============================================================
@@ -678,18 +681,6 @@ export default function PricingPage() {
   const isGlobal = region === "global";
   const premiumPlan = isGlobal ? PREMIUM_GLOBAL : PREMIUM_PLAN;
 
-  // Auto-detect region via IP on mount
-  useEffect(() => {
-    fetch("/api/geo")
-      .then((res) => res.json())
-      .then((data) => {
-        setRegion(data.region === "india" ? "india" : "global");
-      })
-      .catch(() => {
-        // Keep default "global"
-      });
-  }, []);
-
   // Handle Premium upgrade click
   const handleUpgradePremium = () => {
     if (!isDodoConfigured) {
@@ -1143,7 +1134,7 @@ export default function PricingPage() {
                     <p className="text-sm font-bold">3 files</p>
                   </div>
                   <div className="p-3 border-b border-r bg-primary/5">
-                    <p className="text-sm font-bold text-primary">100 files</p>
+                    <p className="text-sm font-bold text-primary">100 files at once</p>
                   </div>
                   <div className="p-3 border-b bg-slate-50 dark:bg-slate-800/50">
                     <div className="flex items-center justify-center gap-1">
@@ -1314,7 +1305,7 @@ export default function PricingPage() {
                 { feature: "Sign & Watermark", free: true, premium: true, enterprise: true },
                 { feature: "Protect & Unlock PDF", free: true, premium: true, enterprise: true },
                 { feature: "Invoice Generator", free: "12/mo", premium: "Unlimited", enterprise: "Unlimited" },
-                { feature: "Bulk Compress", free: "3 files", premium: "100 files", enterprise: "Unlimited" },
+                { feature: "Bulk Compress", free: "3 files", premium: "100 files at once", enterprise: "Unlimited" },
                 { feature: "PDF Summary (AI)", free: "3/mo", premium: "100/mo", enterprise: "Unlimited" },
                 { feature: "PDF Notes (AI)", free: "3/mo", premium: "100/mo", enterprise: "Unlimited" },
                 { feature: "Resume ATS (AI)", free: "3/mo", premium: "100/mo", enterprise: "Unlimited" },

@@ -483,7 +483,7 @@ function SignInForm({
           <p className="text-center text-sm text-muted-foreground mt-4">
             {mode === "signin" ? (
               <>
-                Don&apos;t have an account?{" "}
+                {"Don\u0027t have an account? "}&nbsp;
                 <button
                   onClick={switchMode}
                   className="text-primary font-medium hover:underline"
