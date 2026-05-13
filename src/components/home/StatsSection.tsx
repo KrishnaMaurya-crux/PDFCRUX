@@ -189,7 +189,7 @@ const reviews = [
     name: "Anastasia Petrova",
     role: "Translator",
     company: "LinguaBridge Moscow",
-    text: "Generous free plan with no credit card needed. I use it daily for my research papers and case study submissions. Premium is worth every penny for heavy usage.",
+    text: "Free and no account needed? This is exactly how all online tools should be. I use it daily for my research papers and case study submissions.",
     rating: 5,
     avatar: "https://randomuser.me/api/portraits/women/64.jpg",
   },
