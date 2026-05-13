@@ -149,7 +149,7 @@ export function AuthDialog() {
                 <p className="text-sm text-primary-foreground/80">
                   {currentMode === "login"
                     ? "Sign in to download your files"
-                    : "Join PdfCrux — free forever"}
+                    : "Join PdfCrux — it's free"}
                 </p>
               </motion.div>
             </AnimatePresence>
@@ -329,7 +329,7 @@ export function AuthDialog() {
           <div className="mt-5 text-center text-sm text-muted-foreground">
             {currentMode === "login" ? (
               <>
-                Don&apos;t have an account?{" "}
+                {"Don\u0027t have an account? "}&nbsp;
                 <button
                   onClick={() => {
                     setMode("signup");
@@ -370,7 +370,7 @@ export function AuthDialog() {
             </div>
             <div className="flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-primary" />
-              <span>Free forever</span>
+              <span>Free to use</span>
             </div>
           </div>
         </div>
