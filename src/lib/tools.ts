@@ -90,7 +90,7 @@ export const toolCategories: ToolCategory[] = [
   {
     id: "invoice",
     name: "Invoice Generator",
-    description: "Create & send professional invoices — free forever",
+    description: "Create & send professional invoices — free to use",
     tools: [
       {
         id: "invoice-generator",

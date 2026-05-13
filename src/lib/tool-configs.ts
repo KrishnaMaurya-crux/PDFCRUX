@@ -374,7 +374,6 @@ export const toolConfigs: Record<string, ToolConfig> = {
         label: "OCR.space Engine",
         type: "toggle",
         defaultValue: true,
-        hint: "Use OCR.space API for high-accuracy text extraction with position data. Bypasses 3-page limit automatically.",
       },
       {
         id: "columns",
