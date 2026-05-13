@@ -344,7 +344,7 @@ async function callOcrSpaceApi(
  * Convert OCR.space overlay results into DocxTextBlock array using
  * coordinate-based line grouping and smart word merging.
  */
-function ocrWordsToTextBlocks(ocrResult: OcrResult, pageNum: number): DocxTextBlock[] {
+function ocrWordsToTextBlocks(ocrResult: OcrResult, pageNum: number, dpi: number = 150): DocxTextBlock[] {
   const blocks: DocxTextBlock[] = [];
 
   if (!ocrResult.ParsedResults || ocrResult.ParsedResults.length === 0) return blocks;
@@ -396,8 +396,9 @@ function ocrWordsToTextBlocks(ocrResult: OcrResult, pageNum: number): DocxTextBl
       lineEndX = Math.max(lineEndX, prevEndX);
     }
 
-    // Font size estimation: height * 1.3
-    const fontSize = clampFontSize(Math.round(lineMaxHeight * 1.3));
+    // Font size estimation: convert pixel height to points using DPI
+    // Formula: fontSize_pt = (height_px * 72) / DPI
+    const fontSize = clampFontSize(Math.round((lineMaxHeight * 72) / dpi));
 
     blocks.push({
       text: mergedText,
@@ -1053,8 +1054,49 @@ function buildRealTable(tableData: TableData): Table {
 }
 
 /**
+ * Build an invisible-border table that preserves X,Y positioning for a page.
+ * Each visual row → table row. Each text block → table cell with proportional width.
+ * This is the KEY function for ID cards, forms, and layout-sensitive documents.
+ */
+function buildSingleColumnPageTable(blocks: DocxTextBlock[]): Table {
+  const pageWidth = Math.max(...blocks.map((b) => b.x + b.width)) || 612;
+  const avgHeight = blocks.length > 0
+    ? blocks.reduce((s, b) => s + b.height, 0) / blocks.length
+    : 12;
+  const visualRows = groupIntoRows(blocks, avgHeight);
+  const tableRows: TableRow[] = [];
+
+  for (const vRow of visualRows) {
+    const sortedBlocks = [...vRow.blocks].sort((a, b) => a.x - b.x);
+    const cells: TableCell[] = [];
+
+    for (const block of sortedBlocks) {
+      // Cell width proportional to block's extent relative to page width
+      const cellWidth = Math.max(10, Math.round(((block.x + block.width) / pageWidth) * 100));
+      cells.push(
+        new TableCell({
+          children: [blockToParagraph(block, blocks)],
+          width: { size: cellWidth, type: WidthType.PERCENTAGE },
+          borders: noBorders,
+          margins: { top: 20, bottom: 20, left: 60, right: 60 },
+        })
+      );
+    }
+
+    if (cells.length > 0) {
+      tableRows.push(new TableRow({ children: cells }));
+    }
+  }
+
+  return new Table({
+    rows: tableRows,
+    width: { size: 100, type: WidthType.PERCENTAGE },
+  });
+}
+
+/**
  * Build a single-column DOCX section from pages of text blocks.
- * Sorts all blocks by Y-coordinate (descending) and flows into paragraphs.
+ * Uses invisible-border tables to preserve spatial positioning.
  */
 function buildSingleColumnDocx(
   pages: DocxTextBlock[][],
@@ -1082,31 +1124,14 @@ function buildSingleColumnDocx(
       continue;
     }
 
-    // Sort blocks by Y (top to bottom in reading order = descending Y in PDF coords)
-    const sorted = [...blocks].sort((a, b) => b.y - a.y);
+    // Add page images first
+    for (const img of images) {
+      paragraphs.push(createImageParagraph(img));
+    }
 
-    // Interleave images and text blocks by Y position
-    const sortedImages = [...images].sort((a, b) => b.y - a.y);
-
-    let blockIdx = 0;
-    let imgIdx = 0;
-
-    while (blockIdx < sorted.length || imgIdx < sortedImages.length) {
-      const nextBlock = blockIdx < sorted.length ? sorted[blockIdx] : null;
-      const nextImage = imgIdx < sortedImages.length ? sortedImages[imgIdx] : null;
-
-      // Add image if it should come before the next text block
-      if (nextImage && (!nextBlock || nextImage.y >= nextBlock.y - 20)) {
-        paragraphs.push(createImageParagraph(nextImage));
-        imgIdx++;
-      } else if (nextBlock) {
-        paragraphs.push(blockToParagraph(nextBlock, blocks));
-        blockIdx++;
-      } else {
-        // Only images left
-        paragraphs.push(createImageParagraph(sortedImages[imgIdx]));
-        imgIdx++;
-      }
+    // Build invisible table preserving X,Y positioning
+    if (blocks.length > 0) {
+      tables.push(buildSingleColumnPageTable(blocks));
     }
   }
 
@@ -1117,6 +1142,7 @@ function buildSingleColumnDocx(
  * Build a "keep original columns" layout using invisible-border table cells.
  * For each row of blocks: if multiple blocks have same Y but different X with
  * gap > 50px → multi-column row. Split into columns using the median gap boundary.
+ * ALL pages (single or multi-column) use invisible tables for positioning.
  */
 function buildKeepColumnsDocx(
   pages: DocxTextBlock[][],
@@ -1156,11 +1182,8 @@ function buildKeepColumnsDocx(
     const { columns, isMultiColumn } = detectColumns(rows);
 
     if (!isMultiColumn) {
-      // Fall back to single column
-      const sorted = [...blocks].sort((a, b) => b.y - a.y);
-      for (const block of sorted) {
-        paragraphs.push(blockToParagraph(block, blocks));
-      }
+      // Single-column: still use invisible table to preserve positioning
+      tables.push(buildSingleColumnPageTable(blocks));
       continue;
     }
 
@@ -1308,32 +1331,21 @@ function buildAutoLayoutDocx(
     const sortedImages = [...images].sort((a, b) => b.y - a.y);
 
     if (!multiCol) {
-      // Single column flow
-      let blockIdx = 0;
-      let imgIdx = 0;
-      while (blockIdx < sorted.length || imgIdx < sortedImages.length) {
-        const nextBlock = blockIdx < sorted.length ? sorted[blockIdx] : null;
-        const nextImage = imgIdx < sortedImages.length ? sortedImages[imgIdx] : null;
-        if (nextImage && (!nextBlock || nextImage.y >= nextBlock.y - 20)) {
-          paragraphs.push(createImageParagraph(nextImage));
-          imgIdx++;
-        } else if (nextBlock) {
-          paragraphs.push(blockToParagraph(nextBlock, blocks));
-          blockIdx++;
-        } else {
-          paragraphs.push(createImageParagraph(sortedImages[imgIdx]));
-          imgIdx++;
-        }
+      // Single column: use invisible table to preserve positioning (for ID cards, forms, etc.)
+      for (const img of sortedImages) {
+        paragraphs.push(createImageParagraph(img));
       }
+      tables.push(buildSingleColumnPageTable(blocks));
     } else {
       // Multi-column layout for this page
       const { columns, isMultiColumn } = detectColumns(rows);
 
       if (!isMultiColumn || columns.length < 2) {
-        // Fallback: single column
-        for (const block of sorted) {
-          paragraphs.push(blockToParagraph(block, blocks));
+        // Fallback: use invisible table
+        for (const img of sortedImages) {
+          paragraphs.push(createImageParagraph(img));
         }
+        tables.push(buildSingleColumnPageTable(blocks));
         continue;
       }
 
@@ -1577,14 +1589,14 @@ export async function convertPdfToWord(
         onProgress?.(`Running OCR on page ${pageNum}...`, pagePercent + 2);
 
         // Render page to JPEG and compress
-        const { blob } = await compressPageToMaxSize(pdfDoc, pageNum, MAX_OCR_IMAGE_SIZE);
+        const { blob, dpi } = await compressPageToMaxSize(pdfDoc, pageNum, MAX_OCR_IMAGE_SIZE);
         const base64 = await blobToBase64(blob);
 
         onProgress?.(`Calling OCR.space for page ${pageNum}...`, pagePercent + 4);
 
-        // Sequential API call
+        // Sequential API call (one page at a time — bypasses 3-page limit)
         const ocrResult = await callOcrSpaceApi(base64, options.ocrLanguage);
-        blocks = ocrWordsToTextBlocks(ocrResult, pageNum);
+        blocks = ocrWordsToTextBlocks(ocrResult, pageNum, dpi);
 
         if (blocks.length > 0) {
           ocrPageCount++;
