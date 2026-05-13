@@ -780,7 +780,7 @@ export default function Header() {
 
               {/* Toggle Mode */}
               <p className="text-center text-sm text-muted-foreground">
-                {authMode === "signin" ? "Don&apos;t have an account?" : "Already have an account?"}{" "}
+                {authMode === "signin" ? "Don\u0027t have an account?" : "Already have an account?"}{" "}
                 <button
                   className="text-primary font-bold hover:underline"
                   onClick={() => {
