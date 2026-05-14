@@ -3,15 +3,13 @@ import { NextRequest, NextResponse } from "next/server";
 /**
  * POST /api/ocr-space
  *
- * FIXED version — BUG 1 & BUG 10 from original:
+ * Server-side proxy for OCR.space API.
+ * Needed because OCR.space has CORS restrictions and API keys must stay server-side.
  *
- * BUG 1: Original built multipart body as a plain JS string joined with \r\n.
- *   This produces a malformed multipart body that OCR.space rejects with a 400/parse error.
- *   Fix: Use native FormData — the browser/Node runtime sets the correct
- *   Content-Type boundary automatically.
+ * Body: { base64Image: string, language: string }
+ * Returns: OCR.space JSON response with TextOverlay data
  *
- * BUG 10: Original closing boundary was `${boundary}--` (missing leading --).
- *   RFC 2046 requires `--${boundary}--`. Fixed by using FormData (no manual boundary).
+ * The API key is read from OCR_SPACE_API_KEY env var — NEVER from client input.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -25,6 +23,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // API key from server-side env ONLY — never trust client-provided keys
     const key = process.env.OCR_SPACE_API_KEY;
     if (!key) {
       console.error("OCR_SPACE_API_KEY is not set in environment variables");
@@ -34,21 +33,43 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // FIX: Use FormData — no manual multipart string, no boundary bugs
-    const formData = new FormData();
-    formData.append("base64Image", `data:image/jpeg;base64,${base64Image}`);
-    formData.append("language", language);
-    formData.append("isOverlayRequired", "true");
-    formData.append("OCREngine", "2");
-    formData.append("scale", "true");
-    formData.append("detectOrientation", "true");
-    // Do NOT set Content-Type header — let fetch auto-set it with the correct boundary
+    // Build the multipart form data manually
+    const boundary = `----PdfCruxOCR${Date.now()}`;
+    const parts: string[] = [];
+
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="base64Image"\r\n\r\n${"data:image/jpeg;base64,"}${base64Image}`
+    );
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\n${language}`
+    );
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="isOverlayRequired"\r\n\r\ntrue`
+    );
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="OCREngine"\r\n\r\n2`
+    );
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="scale"\r\n\r\ntrue`
+    );
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="detectOrientation"\r\n\r\ntrue`
+    );
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="detectTables"\r\n\r\ntrue`
+    );
+    parts.push(
+      `--${boundary}\r\nContent-Disposition: form-data; name="tableRecognitionMethod"\r\n\r\n1`
+    );
+    parts.push(`${boundary}--\r\n`);
+
+    const formData = parts.join("\r\n");
 
     const response = await fetch("https://api.ocr.space/parse/image", {
       method: "POST",
       headers: {
         apikey: key,
-        // Content-Type intentionally omitted — FormData sets it with boundary
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
       },
       body: formData,
     });
@@ -57,15 +78,19 @@ export async function POST(request: NextRequest) {
       const errorText = await response.text();
       console.error(`OCR.space API error ${response.status}:`, errorText);
       return NextResponse.json(
-        { error: `OCR.space API returned ${response.status}`, details: errorText },
+        {
+          error: `OCR.space API returned ${response.status}`,
+          details: errorText,
+        },
         { status: response.status }
       );
     }
 
     const data = await response.json();
 
+    // Check for OCR processing errors
     if (data.OCRExitCode !== 1) {
-      console.warn("OCR.space non-success code:", data.OCRExitCode, data.ErrorMessage);
+      console.warn("OCR.space returned non-success code:", data.OCRExitCode, data.ErrorMessage);
     }
 
     return NextResponse.json(data);
