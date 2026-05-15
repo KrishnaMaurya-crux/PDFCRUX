@@ -3891,22 +3891,12 @@ export async function processTool(
 
     case "pdf-to-word": {
       try {
+        // New Gemini Vision engine — returns ProcessResult directly
         const result = await convertPdfToWord(files[0], {
-          useOcrSpace: options["use-ocr-space"] !== false,
-          layoutMode: String(options["columns"] || "auto") as "single" | "keep" | "auto",
-          ocrLanguage: String(options["ocr-language"] || "eng"),
-          enableOcr: options["ocr"] !== false,
+          language: String(options["language"] || "eng"),
+          columns: String(options["columns"] || "auto"),
         }, onProgress);
-        const outputData = result.file.file instanceof File
-          ? new Uint8Array(await result.file.file.arrayBuffer())
-          : new Uint8Array();
-
-        return {
-          success: true,
-          outputFiles: [{ name: result.file.name, data: outputData, size: result.file.size }],
-          message: `Converted ${result.stats.totalPages} pages to Word (${result.stats.totalCharacters.toLocaleString()} chars${result.stats.ocrPages > 0 ? `, ${result.stats.ocrPages} page(s) via OCR` : ""}, ${result.stats.headingsDetected} headings, ${result.stats.tablesDetected} tables, ${result.stats.imagesExtracted} images)`,
-          stats: { originalSize: files[0].size, outputSize: result.file.size },
-        };
+        return result;
       } catch (err) {
         return { success: false, outputFiles: [], message: `Failed to convert PDF to Word: ${err instanceof Error ? err.message : "Unknown error"}` };
       }
