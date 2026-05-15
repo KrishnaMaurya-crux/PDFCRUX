@@ -1,573 +1,330 @@
----
-Task ID: 1
-Agent: Main Agent
-Task: Inject credentials (Supabase, Google Drive, Dropbox) and build Dodo Payments integration
-
-Work Log:
-- Updated .env with Supabase URL/Anon Key, Google Drive (Picker API, Client ID, App ID, Client Secret), Dropbox (App Key, App Secret)
-- Fixed env.ts: Google Drive now includes clientSecret, Dropbox now uses appKey/appSecret instead of accessToken
-- Fixed dropbox.ts: Updated Chooser to use app key properly, removed fallback placeholder
-- Fixed StaticPages.tsx: Extracted useAppStore() from inline callback into proper RefundLink component (React Hook rule fix)
-- Created src/lib/dodo-payments.ts: Full Dodo Payments integration (createCheckout, getPaymentStatus, verifyWebhook, handleWebhookEvent, getPlanPricing)
-- Created src/app/api/payments/checkout/route.ts: POST endpoint for creating Dodo checkout sessions
-- Created src/app/api/payments/webhook/route.ts: POST/GET endpoint for Dodo webhook handling (auto-activates premium, handles cancellations/refunds)
-- Created src/app/api/payments/status/route.ts: GET endpoint for checking payment status
-- Updated PricingPage.tsx: Premium card CTA now opens Dodo checkout dialog (collects name+email, calls /api/payments/checkout, redirects to Dodo payment page). Shows "Coming Soon" fallback when Dodo not configured.
-- All lint errors in src/ resolved (remaining errors only in minified pdf.worker.min.mjs)
-- Health check verified: 4/6 integrations configured, Dodo pending user keys
-
-Stage Summary:
-- Supabase ✅, Google Drive ✅, Dropbox ✅, R2 ✅ all configured
-- Dodo Payments integration fully built and ready for API keys
-- Static pages (Privacy, Terms, Refund, Contact) already existed from previous session
-- Footer links already existed from previous session
-- Razorpay/Lemon Squeezy already removed from previous session
-
+# PdfCrux Worklog
 
 ---
-Task ID: 1
-Agent: Main Agent
-Task: Fix invisible tool UI - all tool pages showing only footer
+Task ID: 0
+Agent: Main
+Task: Initial project state read and analysis
 
 Work Log:
-- Investigated the full project structure: single-page app with Zustand state-based routing in page.tsx
-- Found NO dynamic route folders (src/app/tools/[id]/) - all routing is client-side via Zustand store
-- Analyzed the rendering flow: page.tsx checks currentView + selectedToolId to render tool components
-- Discovered CRITICAL BUG in src/lib/store.ts line 63-68: `selectTool` function had spread order issue
-  - `selectedToolId: toolId` was set BEFORE `...resetToolState()` spread
-  - `resetToolState()` returns `{ selectedToolId: null, ... }` which OVERWRITES the toolId
-  - Result: every tool click set selectedToolId to null → ToolPage returned null → only footer visible
-- Fixed by swapping order: `...resetToolState()` first, then `selectedToolId: toolId` (wins over spread)
-- Also fixed cross-origin blocking in next.config.ts:
-  - Added `allowedDevOrigins` with both `hostname` and `https://hostname` formats
-  - Static assets now return 200 instead of 403 for cross-origin requests from preview iframe
-- Verified: curl tests show 200 for both main page and _next/* static assets with Origin header
-- Dev server compiles cleanly with no errors or cross-origin warnings
+- Read all PDF-to-Word related files (pdf-to-word.ts, ocr-space route, tool-configs, pdf-processor, ToolPage, ToolOptions, tools.ts, page.tsx)
+- Read z-ai-web-dev-sdk types and VLM/LLM skill documentation
+- Confirmed 3 AI tools (pdf-summary, pdf-notes, resume-checker) already exist with local processing
+- Identified all files needing modification for Gemini integration
 
 Stage Summary:
-- ROOT CAUSE: JavaScript object spread order in `selectTool()` - `...resetToolState()` was overwriting `selectedToolId: toolId`
-- FILES CHANGED:
-  1. `src/lib/store.ts` - Fixed selectTool spread order (line 63-68)
-  2. `next.config.ts` - Fixed allowedDevOrigins format (line 17-20)
-- ALL tool functionality (Compress, Merge, Split, Invoice, AI tools, etc.) should now render correctly
-- Backend logic (R2/Supabase) was NOT touched - completely safe
+- Project is Next.js 16 + TypeScript + Tailwind CSS 4 + shadcn/ui
+- Current OCR uses OCR.space with FormData proxy
+- z-ai-web-dev-sdk provides `createVision()` for Gemini Vision API access
+- 3 AI tools (summary, notes, resume-checker) already functional with local processing
+- Need to: Replace OCR.space with Gemini, rewrite converter, update configs, premium UI
 
 ---
 Task ID: 2
-Agent: Main Agent
-Task: Fix all remaining UI issues - auto-scroll, floating logos, tools verification, R2 audit
+Agent: Backend Developer
+Task: Create Gemini OCR API Proxy Route
 
 Work Log:
-- Investigated auto-scroll: NO auto-scroll on page load exists in codebase. All scrollIntoView calls are user-triggered onClick handlers only.
-- Added `useEffect` in page.tsx that calls `window.scrollTo({top: 0, behavior: "instant"})` whenever `currentView` or `selectedToolId` changes — prevents stale scroll position when navigating between views.
-- Added 12 floating brand icons to HeroSection: FileText, Lock, Scissors, Layers, Image, FileSpreadsheet, PenTool, FileDown, RotateCw, Minimize2, Droplets, Hash — each with unique color, size, position, delay, and duration. Icons float with gentle y/rotate animation. Hidden on mobile (sm:block). All at 8-15% opacity.
-- Verified BulkCompressPDF is properly connected in page.tsx line 113-123 via `selectedToolId === "bulk-compress-pdf"` check. Component is 1278 lines, fully functional with batch compression, ZIP download, session resume, notifications.
-- Verified legal pages isolation: Privacy, Terms, Refund, Contact all use separate Zustand state values (currentView === "privacy" etc.) and render inside their own motion.main wrapper. They do NOT interfere with tool rendering.
-- R2 backend audit: r2.ts properly configured with S3Client, upload/download/delete/list functions. API route at /api/r2 handles POST (upload), GET (download/list), DELETE. env.ts centralizes all credentials with isConfigured checks. Health endpoint at /api/health tests live connectivity.
+- Created `/src/app/api/gemini-ocr/route.ts` (~350 lines)
+- Implemented FormData receiver for page images + language + batch metadata
+- Built Gemini Vision API call using z-ai-web-dev-sdk createVision()
+- Used model "gemini-2.0-flash" for optimal speed/quality
+- Implemented robust JSON extraction with markdown fence stripping
+- Added 60-second timeout with Promise.race
+- Full error handling: 400 (invalid input), 500 (SDK init fail), 502 (invalid response), 504 (timeout)
 
 Stage Summary:
-- FILES CHANGED:
-  1. `src/app/page.tsx` — Added useEffect for scroll-to-top on view change + useEffect import
-  2. `src/components/home/HeroSection.tsx` — Added 12 floating colored icons with gentle animations
-- NO backend changes — all R2/Supabase logic untouched and verified working
-- Store fix from previous task (selectTool spread order) confirmed still in place
-- All tools should now: render properly, show full UI, scroll to top on navigation
----
-Task ID: 1
-Agent: Main Agent
-Task: Fix floating brand logos visibility in HeroSection
-
-Work Log:
-- Read HeroSection.tsx and found icons were already in code but with extremely low opacity
-- Root cause: opacity was 0.18 (18%) + Tailwind color modifiers like /25, /15 creating compound ~4.5% effective opacity
-- Removed ALL opacity modifiers from Tailwind color classes (e.g. text-red-400/25 → text-red-400)
-- Increased style opacity from 0.18 to 0.30 (30%)
-- Increased icon sizes by 4px each (22-32 → 26-36)
-- Increased stroke width from 1.2 to 1.5 for better visibility
-- Fixed broken regex that was mangling color class names
-
-Stage Summary:
-- 12 floating brand icons now visible at 30% opacity with smooth floating animations
-- Icons: FileText, Lock, Scissors, Layers, Image, FileSpreadsheet, PenTool, FileDown, RotateCw, Minimize2, Droplets, Hash
-- Each with unique color (red, rose, amber, orange, pink, green, violet, teal, purple, emerald, sky, cyan)
-
----
-Task ID: 2
-Agent: Main Agent
-Task: Fix Sign PDF live preview rendering
-
-Work Log:
-- Investigated sign PDF live preview rendering flow
-- Found signature fonts (Dancing Script, Great Vibes, Kalam, Parisienne, Caveat) loaded via next/font/google but CSS variables NOT applied to body
-- Fixed layout.tsx to include all signature font CSS variables on body element
-- Updated LivePreview font map to use CSS variables (var(--font-dancing)) instead of raw font names
-- Increased typed signature preview size from 0.35x to 0.4x with min 14px
-- Added text-shadow for better visibility on white PDF backgrounds
-- Increased signature image preview from 0.35x to 0.4x with min 60px
-- Added drop-shadow filter for better signature image visibility
-
-Stage Summary:
-- Sign PDF typed signatures now render with correct custom fonts in live preview
-- Draw and upload signature previews are larger and more visible
-- All 7 signature fonts (Georgia, Palatino, Dancing Script, Great Vibes, Kalam, Parisienne, Caveat) now work correctly
+- New Gemini API proxy route ready at `/api/gemini-ocr`
+- Uses z-ai-web-dev-sdk server-side (as required)
+- Returns structured GeminiPage[] with element types: heading1/2/3, paragraph, bullet_list, numbered_list, table
+- Clean error responses with user-friendly messages
 
 ---
 Task ID: 3
-Agent: Main Agent
-Task: Rebuild cloud storage integration (Google Drive + Dropbox) from scratch after sandbox reset
+Agent: Frontend Developer
+Task: Rewrite pdf-to-word.ts with Gemini Vision Engine
 
 Work Log:
-- Created `.env.local` with ALL credentials (Supabase, R2, Google Drive with NEXT_PUBLIC_ prefix, Dropbox with NEXT_PUBLIC_ prefix, NextAuth, Node env)
-- Updated `.env` as backup with same credentials
-- Rewrote `src/lib/env.ts`:
-  - Fixed Google Drive env vars to use NEXT_PUBLIC_ prefix (clientId, apiKey, appId) for client-side access
-  - Fixed Dropbox appKey to use NEXT_PUBLIC_ prefix
-  - Added `scopes` field to googleDrive with 5 OAuth scopes
-  - Added browser-side `console.warn()` in each `isConfigured` getter using a `Set` to warn only once per key
-  - Added `getEnvDebug()` function with masked values for all NEXT_PUBLIC_ vars
-  - Added `mask()` helper (first 6 + "..." + last 4)
-  - Added `warnOnce()` helper with `_warnedKeys` Set
-  - Kept all existing structure (supabase, r2, dodoPayments, getEnvHealth, HealthStatus)
-- Rewrote `src/lib/google-drive.ts`:
-  - Full Google Identity Services (GIS) + Picker API + Drive API v3 integration
-  - Exported GOOGLE_DRIVE_SCOPES string with all 5 scopes
-  - Exported isGoogleDriveReady computed at module level
-  - TypeScript declarations for google.accounts.oauth2, google.picker namespaces
-  - Global Window interface augmentation with google and gapi
-  - `loadGoogleDriveScripts()`: loads GIS → gapi → picker → initTokenClient (idempotent, console.log each step)
-  - `pickFromGoogleDrive()`: main entry — loadScripts → requestAccessToken → openPicker → downloadFiles → File[]
-  - `saveToGoogleDrive()`: multipart upload to Drive v3
-  - `downloadOneFile()`: fetch content from Drive API, create File with correct size
-  - `downloadFiles()`: batch of 5, retry on TokenExpiredError
-  - `TokenExpiredError` class
-  - Internal: loadScript helper, handleTokenResponse callback, requestAccessToken Promise wrapper
-- Rewrote `src/lib/dropbox.ts`:
-  - Full Dropbox Chooser API + Saver API integration
-  - Exported isDropboxReady and dropboxAppKey computed at module level
-  - TypeScript interfaces: DropboxChooserFile, DropboxChooserOptions, DropboxSaverOptions, DropboxSaverFile, DropboxDropinsGlobal
-  - Global Window interface augmentation with Dropbox
-  - `loadDropboxScripts()`: inject dropins.js with data-app-key (idempotent, console.log key presence)
-  - `pickFromDropbox()`: open Chooser → download selected files → validate (prevent 0-byte) → File[]
-  - `downloadChooserFile()`: fetch direct link with ?dl=1, create File with proper size
-  - `saveToDropbox()`: create blob URL → open Saver → revoke URL in finally
-- Created `src/components/tool/CloudStorageButtons.tsx`:
-  - "use client" component
-  - Props: mode ("upload" | "download"), onFilesSelected, onCloudSave, acceptTypes, className
-  - GoogleDriveLogo SVG: multi-color official logo (6 paths with fills: #0066da, #00ac47, #ea4335, #00832d, #2684fc, #ffba00)
-  - DropboxLogo SVG: official open box (all paths fill="#0061FF", NO opacity attributes)
-  - isValidFile helper: checks instanceof File, name non-empty, size > 0
-  - handleGoogleDrive/handleDropbox: config check INSIDE click handlers, NOT at render time
-  - BOTH buttons ALWAYS rendered (no conditional rendering, no return null)
-  - Buttons: w-16 h-16 rounded-full, bg-white dark:bg-card, border-2, shadow-md, hover:shadow-xl, hover:scale-110
-  - Google Drive hover: border-blue-300, Dropbox hover: border-[#0061FF]
-  - Tooltips: "Import from Google Drive" / "Save to Google Drive" (never "Not configured")
-  - Loading state: Loader2 spinner
-- Modified `src/components/tool/ToolPage.tsx`:
-  - Added imports for CloudStorageButtons, saveToGoogleDrive, saveToDropbox
-  - Added handleCloudFilesSelected function (before handleFileSelection)
-  - Added handleCloudSave function with error toasts
-  - Added Cloud Storage Import section after drop zone (when no files uploaded): "or import from" + CloudStorageButtons mode="upload"
-  - Added Cloud Save section after download button (when processing complete): "or save to" + CloudStorageButtons mode="download"
-- Updated `src/app/api/health/route.ts`:
-  - Added envDebug field to response using getEnvDebug()
-- Lint: 0 errors from src/ files (only pre-existing warnings in pdf.worker.min.mjs)
+- Complete rewrite of `/src/lib/converters/pdf-to-word.ts` (~700 lines, down from 2087)
+- Removed ALL OCR.space code (types, API calls, compression pipeline)
+- Implemented 3-phase pipeline: PDF→Images, Gemini Analysis, DOCX Generation
+- Phase 1: Render pages to JPEG at 200 DPI with pdfjs-dist
+- Phase 2: Batch pages (5 per request) to /api/gemini-ocr with retry logic
+- Phase 3: Build DOCX from structured Gemini elements using docx library
+- Added language mapping (14 languages)
+- DOCX uses Calibri font, proper heading hierarchy, bordered tables
 
 Stage Summary:
-- FILES CREATED/MODIFIED:
-  1. `.env.local` — All credentials with NEXT_PUBLIC_ prefix for client-side access
-  2. `.env` — Backup with same credentials
-  3. `src/lib/env.ts` — Fixed env var names, added scopes, warnOnce, getEnvDebug, mask
-  4. `src/lib/google-drive.ts` — Full GIS + Picker + Drive v3 integration
-  5. `src/lib/dropbox.ts` — Full Chooser + Saver integration
-  6. `src/components/tool/CloudStorageButtons.tsx` — Always-rendered cloud storage buttons
-  7. `src/components/tool/ToolPage.tsx` — Integrated cloud import and save into tool flow
-  8. `src/app/api/health/route.ts` — Added envDebug field
-- KEY DESIGN DECISIONS:
-  - Cloud buttons ALWAYS visible regardless of config (config check in click handlers)
-  - All client-side env vars use NEXT_PUBLIC_ prefix
-  - Google Drive APP_ID is "533715975645" (Project Number)
-  - Token retry logic for expired tokens during batch downloads
-  - Blob URL cleanup in finally block for Dropbox save
+- Clean modular code, ~700 lines (down 66% from old 2087 lines)
+- No z-ai-web-dev-sdk on client (server-only via API route)
+- Exports convertPdfToWord(file, options, onProgress?) → ProcessResult
+- Zero images in output — fully editable text only
+- Tables have visible borders with gray header shading
+- Bullet/numbered lists properly formatted
 
 ---
-Task ID: 1
-Agent: Main Agent
-Task: Fix 4 cloud integration bugs in PdfCrux
+Task ID: 4+6
+Agent: UI Developer
+Task: Update tool-configs.ts and ToolPage.tsx for Gemini
 
 Work Log:
-- Read all cloud-related files: env.ts, dropbox.ts, google-drive.ts, CloudStorageButtons.tsx, AIToolPage.tsx, ToolPage.tsx
-- Bug 1: Added CloudStorageButtons import and render in AIToolPage.tsx below drop zone with "or import from" label
-- Bug 2: Added verbose console.log debugging in dropbox.ts loadDropboxScripts for appKey + raw env var + data-app-key verification
-- Bug 3: Added 90-second timeout to requestAccessToken() in google-drive.ts to prevent infinite hang when user closes OAuth popup; added picker callback action logging
-- Bug 4: Verified all 6 import/export pairs match; verified all NEXT_PUBLIC_ prefixed vars in env.ts and .env
-- Ran lint: zero errors on all modified files
-- Committed as 5c986ce
+- Updated `tool-configs.ts` pdf-to-word section:
+  - Removed `use-ocr-space` toggle
+  - Removed `ocr` (Enable OCR Fallback) toggle
+  - Renamed `ocr-language` → `language` with updated labels
+  - Updated upload subtitle with "Powered by Gemini AI" messaging
+  - Updated processing steps for Gemini AI workflow
+- Updated `ToolPage.tsx`:
+  - Added premium AI processing animation for pdf-to-word
+  - Dual rotating rings (amber/emerald) with Sparkles icon
+  - "Gemini AI is Analyzing" heading with premium badges
+  - Added Sparkles to lucide-react imports
+  - Fixed processing state condition to avoid overlap
+- Verified 3 AI tools (summary, notes, resume-checker) are functional:
+  - All modules export proper functions
+  - extractTextFromPDF exists in pdf-ai-tools.ts
+  - No import issues
 
 Stage Summary:
-- 3 files modified: AIToolPage.tsx, dropbox.ts, google-drive.ts
-- 40 insertions, 2 deletions
-- All 4 bugs fixed and committed
-- Commit: 5c986ce
-
----
-Task ID: 2
-Agent: Main Agent
-Task: Fix real functional bugs in cloud integration
-
-Work Log:
-- Read all 4 files: env.ts, dropbox.ts, google-drive.ts, CloudStorageButtons.tsx
-- Bug 1: Identified root cause — env.ts indirection + stale module-level const. Fixed by reading process.env.NEXT_PUBLIC_DROPBOX_APP_KEY directly. Removed appSecret from frontend.
-- Bug 2: Identified root cause — picker callback only handled PICKED not PICK. Fixed by handling both actions. Added comprehensive logging throughout the file download chain.
-- Bug 3: Changed CANCEL from reject to resolve(empty array). Added 120s picker timeout + 90s token timeout.
-- Bug 4: Removed appSecret (dropbox) and clientSecret (googleDrive) from env.ts frontend config.
-- Bug 5: Changed CloudStorageButtons to use runtime getter functions instead of stale module-level constants.
-- All handlers have proper try/catch/finally with setLoading(null) in finally.
-- Lint: zero errors on all modified files.
-- Committed as 271640b.
-
-Stage Summary:
-- 4 files modified: env.ts, dropbox.ts, google-drive.ts, CloudStorageButtons.tsx
-- 239 insertions, 128 deletions
-- Commit: 271640b
-
----
-Task ID: 3
-Agent: pdf-to-jpg-converter
-Task: Implement real PDF to JPG converter
-
-Work Log:
-- Created src/lib/converters/pdf-to-jpg.ts
-- Implemented pdfjs-dist rendering at configurable DPI (High=300, Medium=200, Low=150)
-- Added page range parsing supporting formats like "1-3,5,7-10", "all", and empty string
-- Canvas-based rendering with white background fill and JPEG quality 0.92
-- Single page returns direct JPG blob; multiple pages bundled into ZIP via jszip
-- Real-time progress callback with status text and percentage (0-100)
-- Memory cleanup via page.cleanup() after each render
-- Full TypeScript types: OutputFile, ConversionStats, PdfToJpgOptions
-- Zero lint errors on the new file
-
-Stage Summary:
-- File: src/lib/converters/pdf-to-jpg.ts
-- Dependencies: pdfjs-dist (already installed v4.10.38), jszip (already installed v3.10.1)
-- Exported: convertPdfToJpg(file, options, onProgress) → { files: OutputFile[], stats: ConversionStats }
-- Worker: /pdf.worker.min.mjs (already in public/)
----
-Task ID: 4
-Agent: jpg-to-pdf-converter
-Task: Implement real JPG to PDF converter
-
-Work Log:
-- Created src/lib/converters/jpg-to-pdf.ts
-- Implemented pdf-lib image embedding (embedJpg for JPEG, embedPng for PNG)
-- Added orientation support: Portrait / Landscape / Auto-detect (image width > height → landscape)
-- Added scaling modes: Fit to Page (contain, with margins), Fill Page (cover, may crop), Original Size (fallback to fit if overflows)
-- Added configurable margins (0–50mm) with mm→pt conversion
-- Added page sizes: A4, Letter, Legal
-- Multi-image sequencing: each image → one PDF page
-- Real-time progress callback: "Processing image X of Y...", "Generating PDF..."
-- Exported types: OutputFile, ConversionStats, JpgToPdfOptions
-- Added formatBytes utility for human-readable file sizes
-- Full TypeScript strict types throughout
-- Zero lint errors (verified with bun run lint)
-
-Stage Summary:
-- File: src/lib/converters/jpg-to-pdf.ts
-- Dependencies: pdf-lib (installed), jspdf (available but not used)
-- Supports: .jpg, .jpeg, .png input files
-- Client-side only — no server APIs used
-
----
-Task ID: 5
-Agent: pdf-to-word-converter
-Task: Implement real PDF to Word converter with OCR
-
-Work Log:
-- Created src/lib/converters/pdf-to-word.ts
-- Text extraction with positioning via pdfjs-dist (getTextContent → x, y, width, height, fontName per item)
-- Line grouping algorithm: sorts items top-to-bottom then left-to-right, groups by y-position proximity (adaptive threshold = max(fontSize * 0.4, 3px))
-- Smart word gap detection: compares inter-item gap against average character width to insert single or double spaces
-- Heading detection: fontSize > 18 → Heading 1, > 14 → Heading 2, > 12 → Heading 3, else normal paragraph
-- Bold/italic detection from font name analysis (checks for "bold", "black", "heavy", "italic", "oblique")
-- docx library for proper DOCX generation: Document, Paragraph, TextRun, HeadingLevel, PageBreak, Packer.toBlob()
-- Tesseract.js OCR integration for scanned PDFs: triggers when extracted text < 10 characters per page
-- OCR renders page at 2x scale to canvas, runs Tesseract recognize with language option
-- Progress callback support: "Loading PDF document...", "Extracting text from page X...", "Running OCR on page X...", "Reconstructing layout...", "Generating Word document...", "Finalizing..."
-- Full TypeScript types: OutputFile, ConversionStats, ExtractedTextItem, ExtractedLine, ExtractedPage
-- Zero lint errors on the new file (all 7 lint errors are pre-existing in pdf.worker.min.mjs)
-
-Stage Summary:
-- File: src/lib/converters/pdf-to-word.ts
-- Dependencies: pdfjs-dist (v4.10.38), docx (v9.6.1), tesseract.js (v7.0.0) — all installed
-- Exported: convertPdfToWord(file, options, onProgress) → { file: OutputFile; stats: ConversionStats }
-- Worker: /pdf.worker.min.mjs (already in public/)
-
----
-Task ID: 6
-Agent: word-to-pdf-converter
-Task: Implement real Word to PDF converter
-
-Work Log:
-- Created src/lib/converters/word-to-pdf.ts
-- mammoth v1.12.0 to parse DOCX → HTML (convertToHtml with arrayBuffer input)
-- html2canvas-pro v2.0.2 to render HTML at 2× scale into a high-quality canvas
-- jsPDF v4.2.1 to produce paginated PDF from canvas slices
-- HTML enhancement: wraps mammoth output in styled container with proper typography (Times New Roman, 12pt, 1.6 line-height)
-- Comprehensive CSS injected for headings (h1–h4), paragraphs, lists, tables, images, links, bold/italic, blockquotes
-- Page splitting: calculates page-content canvas height from page dimensions in points → divides total canvas height into page slices
-- Each page slice rendered as JPEG (quality 0.92) and added as an image to jsPDF with proper margin offsets
-- Supports page sizes: A4 (210×297mm), Letter (215.9×279.4mm), Legal (215.9×355.6mm)
-- Supports orientation: portrait / landscape
-- Supports configurable margins in mm
-- Hyperlinks preserved in HTML (mammoth default) and rendered in PDF via canvas
-- Temporary DOM container created off-screen (-9999px left), removed in finally block
-- Progress callback: "Reading document..." → "Converting to HTML..." → "Rendering pages..." → "Rendering content to canvas..." → "Generating PDF pages..." → "Processing page X of Y..." → "Generating PDF..." → "Finalizing..." → "Done!"
-- Full TypeScript types: OutputFile { name, data: Uint8Array, size }, ConversionStats { inputSize, outputPages, outputSize, elapsedMs, imagesExtracted }
-- Exported: convertWordToPdf(file, options, onProgress) → { file: OutputFile; stats: ConversionStats }
-- Zero lint errors on the new file (all 7 lint errors pre-existing in pdf.worker.min.mjs)
-
-Stage Summary:
-- File: src/lib/converters/word-to-pdf.ts
-- Dependencies: mammoth (v1.12.0), html2canvas-pro (v2.0.2), jspdf (v4.2.1) — all installed
-- Client-side only — no server APIs used
-- Strategy: DOCX → mammoth → HTML → html2canvas → canvas → page-slice → jsPDF → PDF
-
----
-Task ID: 7
-Agent: pdf-to-excel-converter
-Task: Implement real PDF to Excel converter with table detection and OCR
-
-Work Log:
-- Created src/lib/converters/pdf-to-excel.ts
-- Text extraction with positioning via pdfjs-dist (getTextContent → x, y, width, height, fontSize per item)
-- Row grouping algorithm: sorts items top-to-bottom then left-to-right, groups by y-position proximity (adaptive threshold = max(fontSize * 0.4, 3px))
-- Table detection algorithm:
-  - Computes column start x-positions per row
-  - Checks row compatibility via column alignment (≥40% match ratio within 5px tolerance)
-  - Multi-item rows: table if at least one neighbor is compatible
-  - Single-item rows: table only if both neighbors are table rows
-  - Contiguous table rows grouped into table blocks
-- Column boundary computation: clusters all item x-positions (5px threshold), each cluster → median x as column edge
-- Cell mapping: each item assigned to closest column boundary by center x-position
-- Three extract modes:
-  - 'auto': detect tables and non-table blocks, preserve both
-  - 'tables': only extract detected table blocks (filter out paragraph text)
-  - 'full-text': all content as single-column rows (no table detection)
-- Excel generation via xlsx library:
-  - buildWorkbook(): each PDF page → separate worksheet ("Page 1", "Page 2", etc.)
-  - buildSingleSheetWorkbook(): all content in one "Sheet 1" (used for single-page PDFs)
-  - Column widths auto-sized based on max content length (capped at 50 chars)
-  - XLSX.utils.aoa_to_sheet() for cell creation, XLSX.write() with bookType 'xlsx' for output
-- Tesseract.js OCR fallback: triggers when extracted text < 10 characters per page
-  - Renders page at 2x scale to canvas, runs Tesseract recognize with configurable language
-  - OCR text split by lines into rows
-  - In 'tables' mode: attempts tab/space-delimited column splitting on OCR output
-- Progress callbacks: "Loading PDF document...", "Analyzing page X...", "Detecting tables on page X...", "Mapping cells on page X...", "Running OCR on page X...", "Generating Excel...", "Writing XLSX file...", "Finalizing..."
-- Full TypeScript types: OutputFile, ConversionStats, ExtractedTextItem, TextRow, DetectedTable, NonTableBlock, ContentBlock, PageContent
-- Zero lint errors on the new file (all errors pre-existing in pdf.worker.min.mjs)
-
-Stage Summary:
-- File: src/lib/converters/pdf-to-excel.ts
-- Dependencies: pdfjs-dist (v4.10.38), xlsx (v0.18.5), tesseract.js (v7.0.0) — all installed
-- Exported: convertPdfToExcel(file, options, onProgress) → { file: OutputFile; stats: ConversionStats }
-- Options: { enableOcr: boolean, extractMode: 'auto' | 'tables' | 'full-text', language: string }
-- Stats: { totalPages, ocrPages, totalCells, totalRows, tablesDetected, processingTimeMs }
-- Worker: /pdf.worker.min.mjs (already in public/)
-- Client-side only — no server APIs used
-
----
-Task ID: 8
-Agent: excel-to-pdf-converter
-Task: Implement real Excel to PDF converter
-
-Work Log:
-- Installed jspdf-autotable@5.0.7 (was not in project dependencies)
-- Created src/lib/converters/excel-to-pdf.ts
-- Excel parsing via xlsx library: XLSX.read(data, { type: 'array' }), iterates workbook.SheetNames
-- Each worksheet converted to 2D array via XLSX.utils.sheet_to_json(sheet, { header: 1 })
-- PDF generation via jsPDF + jspdf-autotable:
-  - First row treated as header with styled head (blue background, white text, bold)
-  - Remaining rows rendered as body with alternating row colors (#f5f5f5)
-  - Column width calculation: fit-to-width (even distribution) or character-based heuristic (scaled to page)
-  - Cell value conversion: null → empty string, boolean → TRUE/FALSE, dates as strings
-- Page size support: A4, Letter, Legal with portrait/landscape orientation
-- Gridlines option: toggles between "grid" and "plain" autotable themes
-- Long tables: automatic page breaks via jspdf-autotable, footer with sheet name + page number
-- Each worksheet starts on a new PDF page with bold sheet title header
-- Empty sheets detected and skipped with "(empty sheet)" placeholder
-- Progress callbacks: "Reading Excel file..." → "Found N worksheet(s)" → "Processing sheet..." → "Sheet complete" → "Generating PDF..." → "Conversion complete!"
-- Full TypeScript types: OutputFile, ConversionStats, ExcelToPdfOptions
-- Zero lint errors on the new file (all errors pre-existing in pdf.worker.min.mjs)
-
-Stage Summary:
-- File: src/lib/converters/excel-to-pdf.ts
-- Dependencies: xlsx (v0.18.5), jspdf (v4.2.1), jspdf-autotable (v5.0.7) — all installed
-- Exported: convertExcelToPdf(file, options, onProgress) → { file: OutputFile; stats: ConversionStats }
-- Options: { pageSize: 'a4' | 'letter' | 'legal', orientation: 'portrait' | 'landscape', fitToWidth: boolean, gridlines: boolean }
-- Stats: { originalSize, totalSheets, convertedSheets, totalRows, totalColumns, outputSize, conversionTimeMs }
-- Client-side only — no server APIs used
+- Config options streamlined (removed 2 unnecessary toggles)
+- Premium AI processing UI with animated Gemini branding
+- All 4 AI features (pdf-to-word OCR + 3 existing AI tools) confirmed ready
+- Only pre-existing lint issues remain (no new errors from our changes)
 
 ---
 Task ID: 9
-Agent: ppt-to-pdf-converter
-Task: Implement real PPT to PDF converter
+Agent: Main
+Task: Integration fixes and final verification
 
 Work Log:
-- Created src/lib/converters/ppt-to-pdf.ts
-- PPTX is a ZIP archive — uses JSZip to extract contents
-- Slide discovery: regex match on ppt/slides/slideN.xml filenames, sorted by slide number
-- Slide dimension detection: parses ppt/presentation.xml <p:sldSz> element for cx/cy attributes (EMU units)
-- XML parsing via DOMParser with namespace-agnostic element lookup (localName matching)
-- Text extraction from slide XML:
-  - Traverses <p:spTree> → <p:sp> → <p:txBody> → <a:p> → <a:r> → <a:t>
-  - Position from <p:spPr><a:xfrm><a:off> and <a:ext> (EMU coordinates)
-  - Font properties from <a:rPr> (sz in hundredths of a point, bold/italic from b/i elements or attributes)
-  - Default run properties from <a:pPr><a:defRPr> for paragraphs without explicit run properties
-- Image extraction:
-  - Detects <p:pic> elements in slide tree
-  - Resolves image references via <a:blip r:embed="rIdN"> → relationship file (ppt/slides/_rels/slideN.xml.rels)
-  - Loads image data from resolved path in ZIP (supports PNG, JPEG — other formats skipped gracefully)
-  - Position and size from <a:xfrm> within <p:spPr>
-- Speaker notes extraction: parses ppt/notesSlides/notesSlideN.xml, collects all <a:t> text
-- PDF rendering via jsPDF:
-  - Page size: A4, Letter, or Widescreen (254×190.5mm landscape)
-  - EMU-to-mm coordinate transformation with scaling to fit usable page area
-  - Images rendered first (as backgrounds), then text overlaid
-  - Font size scaled proportionally, clamped between 6pt and 36pt
-  - Text word-wrapped within text box boundaries using pdf.splitTextToSize()
-  - Vertical centering of text within text boxes
-  - Optional speaker notes rendered at bottom with separator line (15mm reserved area)
-- Progress callbacks: "Reading PPTX file..." → "Extracting slide content..." → "Found N slides" → "Parsing slide X..." → "Slide X parsed" → "Rendering slides to PDF..." → "Generating PDF file..." → "Conversion complete!"
-- Full TypeScript types: OutputFile, ConversionStats, PptToPdfOptions, TextElement, SlideContent
-- Zero lint errors on the new file (all errors pre-existing in pdf.worker.min.mjs)
+- Fixed key mismatch: converter was reading `options["ocr-language"]` but config renamed to `options["language"]`
+- Fixed pdf-processor.ts: Updated pdf-to-word case to use new converter interface (returns ProcessResult directly, not old OutputFile/ConversionStats)
+- Removed old OCR.space options from processor call
+- Ran ESLint: 0 new errors from modified files (only pre-existing issues remain)
+- Restarted dev server — confirmed HTTP 200 response on homepage
+- Verified all file modifications compile correctly
 
 Stage Summary:
-- File: src/lib/converters/ppt-to-pdf.ts
-- Dependencies: jszip (v3.10.1), jspdf (v4.2.1) — all installed
-- Exported: convertPptToPdf(file, options, onProgress) → { file: OutputFile; stats: ConversionStats }
-- Options: { pageSize: 'a4' | 'letter' | 'widescreen', includeNotes: boolean }
-- Stats: { originalSize, totalSlides, convertedSlides, totalTextElements, totalImages, outputSize, conversionTimeMs }
-- Client-side only — no server APIs used
-- Strategy: PPTX (ZIP) → JSZip → parse slide XML → extract text/images → jsPDF → PDF
+- All integration points fixed between new converter and existing processor
+- Dev server compiles and responds correctly
+- Total files modified: 5 (gemini-ocr/route.ts NEW, pdf-to-word.ts REWRITTEN, tool-configs.ts UPDATED, ToolPage.tsx UPDATED, pdf-processor.ts UPDATED)
+- Old OCR.space route at /api/ocr-space still exists (not deleted to avoid breaking any unknown references)
 
 ---
 Task ID: 10
-Agent: Main Agent
-Task: Wire 7 new format converters into the processing pipeline
+Agent: Main
+Task: Connect all 3 AI tools (Summarizer, Notes, Resume ATS) to Gemini AI engine
 
 Work Log:
-- Read worklog.md and understood full project history
-- Read src/lib/pdf-processor.ts (3828 lines) — the master processing engine
-- Read all 7 converter files to understand their exported function signatures and return types
-- Read src/lib/tool-configs.ts for option definitions for each tool
-- Analyzed the existing processTool() switch/case structure (line 3747-3828)
-- Found existing stub implementations: imageToPDF, pdfToImage, pdfToWord, pdfToExcel, officeToPDF
-- Added 7 import statements at the top of pdf-processor.ts for the real converter modules
-- Replaced 7 stub case handlers in processTool() with real converter calls:
-  1. jpg-to-pdf → convertJpgToPdf() with margin/fit/page-size/option mapping
-  2. pdf-to-jpg → convertPdfToJpg() with quality slider→label mapping, page-range pass-through
-  3. pdf-to-word → convertPdfToWord() with ocr/language/preserve-layout/columns option mapping
-  4. pdf-to-excel → convertPdfToExcel() with detection→extractMode mapping, ocr toggle
-  5. word-to-pdf → convertWordToPdf() with margin/size/orientation mapping
-  6. excel-to-pdf → convertExcelToPdf() with size/orientation/fitToWidth mapping
-  7. powerpoint-to-pdf → convertPptToPdf() with widescreen/notes option mapping
-- Handled data type differences between converters (Blob, Uint8Array, File) with proper conversions to Uint8Array
-- Added try/catch around each converter call with meaningful error messages
-- Mapped tool-config option IDs to converter option keys (e.g., "fit" → "scaling", "margins" → "margin" with value mapping)
-- Ran lint: 0 errors in modified files (only pre-existing warnings in pdf.worker.min.mjs)
-- Verified no new lint issues introduced
+- Created shared Gemini utility `src/lib/gemini.ts`:
+  - `callGemini<T>()` — core function to call Gemini via z-ai-web-dev-sdk
+  - `SYSTEM_PROMPTS` — one per tool (summarize, notes, resume) with detailed instructions
+  - `extractJson<T>()` — robust JSON extraction from Gemini responses
+  - `extractTextFromPDF()` — server-side PDF text extraction using pdfjs-dist
+  - 90-second timeout, error resilience, API key detection
+
+- Created 3 new API routes:
+  - `/api/gemini/summarize/route.ts` — PDF text extraction → Gemini → structured summary JSON
+  - `/api/gemini/notes/route.ts` — PDF text extraction → Gemini → structured study notes JSON
+  - `/api/gemini/resume/route.ts` — Resume text + optional JD → Gemini → ATS score + analysis JSON
+
+- Complete rewrite of `AIToolPage.tsx`:
+  - Removed all local processing (no more client-side pdfjs-dist or heuristic algorithms)
+  - All 3 tools now call their respective Gemini API routes via fetch + FormData
+  - Premium Gemini AI processing animation (dual rotating rings + BrainCircuit icon)
+  - Resume checker now supports DUAL UPLOAD: resume PDF + job description textarea
+  - Updated all descriptions, badges, FAQs, and how-it-works sections
+  - "Powered by Gemini AI" badges on results
+  - Multi-language support noted (40+ languages)
+  - Removed "100% Private / files never leave browser" messaging
+
+- Updated `tool-configs.ts` for all 3 AI tools:
+  - "Powered by Gemini AI" subtitles
+  - Updated processing steps to mention Gemini
+  - Updated button text with "with AI"
+  - Updated output descriptions
 
 Stage Summary:
-- FILE MODIFIED: src/lib/pdf-processor.ts
-- 7 import lines added at top
-- 7 case handlers replaced in processTool() switch (jpg-to-pdf, pdf-to-jpg, pdf-to-word, pdf-to-excel, word-to-pdf, excel-to-pdf, powerpoint-to-pdf)
-- Old stub functions (imageToPDF, pdfToImage, pdfToWord, pdfToExcel, officeToPDF) remain in the file for backward compatibility but are no longer called by processTool
-- Each case handles Blob/Uint8Array/File → Uint8Array conversion for ProcessResult compatibility
-- Option mapping: tool-config option IDs → converter option keys with value transformations
+- All 4 AI tools now use Gemini as the core engine:
+  1. PDF to Word → Gemini Vision (images → structured elements → DOCX)
+  2. PDF Summarizer → Gemini (text → executive summary bullets)
+  3. PDF to Notes → Gemini (text → structured study notes)
+  4. Resume ATS Scorer → Gemini (resume + JD → ATS score + analysis)
+- One shared GEMINI_API_KEY env var needed
+- Each tool has its own SYSTEM_PROMPT for Gemini
+- Zero lint errors on all new files
+- Dev server compiles and responds correctly
+- Ready for API key — just set GEMINI_API_KEY in .env
 
 ---
 Task ID: 11
-Agent: Main Agent
-Task: Wire real-time progress callbacks from 7 format converters to UI
+Agent: Main
+Task: Fix all 3 AI tools crashing on deployment — complete production rewrite
 
 Work Log:
-- Added `processingStatus: string` field to Zustand store (AppState interface + state + resetToolState)
-- Added `setProcessingStatus: (status: string) => void` action to store
-- Updated `startProcessing()` to initialize `processingStatus: "Initializing..."`
-- Updated `resetTool()` to clear `processingStatus: ""`
-- Added `onProgress?: (status: string, percent: number) => void` parameter to `processTool()` in pdf-processor.ts
-- Replaced all 7 `(_status, _percent) => {}` stub callbacks with real `onProgress` parameter in pdf-processor.ts
-- Updated ToolPage.tsx to use `processingStatus` and `setProcessingStatus` from store
-- Added format tool detection: `formatTools` array with 7 tool IDs
-- For format tools: passes real onProgress callback that calls setProcessingStatus + setProcessingProgress + setCurrentStep
-- For non-format tools: keeps existing fake random progress animation
-- Updated progress display UI to show `processingStatus` text (real status from converters) instead of just percentage
-- Verified: 0 lint errors in modified files, HTTP 200 on dev server
+- Diagnosed 4 root causes of production crashes:
+  1. **Model ID wrong**: `gemini-2.0-flash` → fixed to `gemini-1.5-flash-8b` everywhere
+  2. **Server-side PDF parsing broken**: `extractTextFromPDF()` using pdfjs-dist worker crashes on Vercel
+  3. **Frontend JSON parse crash**: `response.json()` without `response.ok` check → "Unexpected token" when backend 500s
+  4. **Missing runtime export**: No `export const runtime = 'nodejs'` on API routes
+
+- **Complete rewrite of `src/lib/gemini.ts`**:
+  - Model: `gemini-1.5-flash-8b` (was `gemini-2.0-flash`)
+  - NEW `callGeminiVision()` — sends images via `createVision()` + tool-specific system prompt
+  - Kept `callGemini()` as text-only fallback
+  - Removed `extractTextFromPDF()` — no longer needed (moved to client side)
+  - Added `blobToDataUri()` helper for API routes
+  - Better error handling: timeout, rate limit, API key detection
+  - 120s timeout for vision, 90s for text
+
+- **Rewrote all 3 API routes** (`summarize`, `notes`, `resume`):
+  - Added `export const runtime = 'nodejs'` — forces Node.js (not Edge) for Gemini SDK
+  - Changed from receiving PDF file → receiving page images (FormData with `images[]` key)
+  - Added try-catch around `request.formData()` for malformed requests
+  - Comprehensive validation: image count, total size (20MB limit), page limits
+  - Always returns valid JSON — never lets Next.js return HTML error pages
+  - Routes: `/api/gemini/summarize`, `/api/gemini/notes`, `/api/gemini/resume`
+
+- **Created `src/lib/pdf-to-images.ts`** (client-side utility):
+  - `pdfToImages(file, onProgress?)` → `{ images: Blob[], totalPages, wordCount }`
+  - Renders PDF pages to JPEG at 200 DPI using browser's pdfjs-dist
+  - Also extracts word count from text content for metadata
+  - Max 30 pages, JPEG quality 0.85
+
+- **Rewrote `src/components/tool/AIToolPage.tsx`**:
+  - NEW: Client-side PDF→images conversion before API call (phase 1 of processing)
+  - FIXED: `response.ok` check before `response.json()` — prevents "Unexpected token" crash
+  - FIXED: Graceful error message extraction from non-200 responses
+  - Updated engine badges: `gemini-1.5-flash-8b` (was `gemini-2.0-flash`)
+  - Updated progress steps to include "Converting PDF pages to images..."
+  - Loader2 icon during conversion phase, BrainCircuit during AI phase
+  - Better error UI with red themed card and "Try Again" button
+
+- **Updated `src/app/api/gemini-ocr/route.ts`**:
+  - Model: `gemini-2.0-flash` → `gemini-1.5-flash-8b`
+
+- Verified: All routes return proper JSON errors for malformed requests (400, not 500)
+- Verified: Homepage returns HTTP 200
+- Verified: ESLint clean (only pre-existing errors from worker file + AuthProvider)
 
 Stage Summary:
-- FILES MODIFIED:
-  1. `src/lib/store.ts` — Added processingStatus field + setProcessingStatus action
-  2. `src/lib/pdf-processor.ts` — Added onProgress param to processTool(), wired to all 7 converters
-  3. `src/components/tool/ToolPage.tsx` — Real progress for format tools, status text display
-- Format tools (PDF to JPG, JPG to PDF, etc.) now show REAL progress from converters
-- Non-format tools (merge, compress, etc.) still use fake progress animation
-- Status text shows converter messages like "Extracting text from page 3...", "Running OCR on page 1...", etc.
+- **Architecture change**: Server-side PDF parsing REMOVED. Client renders PDF to images, sends to backend, backend forwards to Gemini Vision.
+- **Files modified**: 7 files total
+  1. `src/lib/gemini.ts` — REWRITTEN (model, Vision API, removed PDF parser)
+  2. `src/app/api/gemini/summarize/route.ts` — REWRITTEN (images in, Vision API, Node.js runtime)
+  3. `src/app/api/gemini/notes/route.ts` — REWRITTEN (images in, Vision API, Node.js runtime)
+  4. `src/app/api/gemini/resume/route.ts` — REWRITTEN (images in, Vision API, Node.js runtime)
+  5. `src/lib/pdf-to-images.ts` — NEW (client-side PDF→JPEG converter)
+  6. `src/components/tool/AIToolPage.tsx` — REWRITTEN (client PDF conversion, error handling, badges)
+  7. `src/app/api/gemini-ocr/route.ts` — UPDATED (model ID fix)
+- **Root causes fixed**: Model ID, server PDF parsing crash, frontend JSON parse crash, missing runtime
+- **Production ready**: All error paths return valid JSON, Node.js runtime enforced, proper timeout handling
+
 ---
 Task ID: 12
-Agent: Main Agent
-Task: Fix all Vercel build errors (9+ TS errors) and verify 7 converters
+Agent: Main
+Task: Replace image-based approach with native PDF inlineData — send PDF buffer directly to Gemini
 
 Work Log:
-- Ran `npx tsc --noEmit` and found 20+ TypeScript errors across src/
-- Fixed src/lib/converters/jpg-to-pdf.ts: Removed `PageSizes` import (value used as type), changed return type to `string`
-- Fixed src/lib/converters/word-to-pdf.ts: Fixed mammoth message type check from `"info"` to `"warning"` with explicit type annotation
-- Fixed src/lib/pdf-processor.ts (multiple errors):
-  - comparePDFs: Added `bytesA`/`bytesB` declaration (was undefined)
-  - comparePDFs: Fixed `pages` type from `never[]` to `ReturnType<typeof report.addPage>[]`
-  - convertToPDFA: Fixed `setKeywords()` from `string` to `string[]`
-  - base64ToArrayBuffer: Changed return type from `ArrayBuffer` to `Uint8Array`
-  - protectPDF/unlockPDF: `data` now returns `Uint8Array` instead of `ArrayBuffer`
-  - editPDF: Replaced `underline: true` + `addHttpLink()` with manual `drawLine()` underline
-  - editPDF: Fixed `addPage()` return type (removed `typeof currentPage`)
-  - canvasToBlob: Added proper `await` before `.arrayBuffer()` calls
-  - downloadBlob: Fixed `BlobPart` type issue with explicit `new Uint8Array(...)` wrapping
-  - processTool pdf-to-jpg: Fixed `instanceof` check with explicit type annotation
-- Fixed src/app/api/pdf/process/route.ts: `setKeywords()` expects `string[]`, password option removed from LoadOptions
-- Fixed src/app/api/r2/route.ts: Wrapped `Buffer` in `new Uint8Array()` for NextResponse
-- Fixed src/components/tool/BulkCompressPDF.tsx: Removed `toast` from useAppStore (not in store), fixed `showToast` → `toast`, fixed Uint8Array BlobPart
-- Fixed src/components/tool/LivePreview.tsx: Added `organizeMode != null` check
-- Fixed src/components/tool/ToolPage.tsx: Wrapped `outputFile.data` in `new Uint8Array()` for Blob
-- Fixed src/lib/bulk-compress.ts: Wrapped `buffer` in `new Uint8Array()` for File constructor
-- Fixed src/lib/bulk-compress-db.ts: Added explicit `<void>` type parameters to Promise
-- Fixed src/lib/pdf-summary-tool/summary-engine.ts: Changed `para` to `para.text` for ScoredParagraph
-- Fixed 5 resume-checker-tool files: Added `export type` re-exports for interfaces from ./types
-- Final tsc --noEmit: ZERO errors in src/ (only examples/skills pre-existing)
-- Dev server: HTTP 200, compiles successfully
+- User requested: stop converting PDF→images, send PDF buffer directly via Gemini's `file_url` inlineData
+- Discovered z-ai-web-dev-sdk supports `type: 'file_url'` with `data:application/pdf;base64,...` URIs natively
+- **Complete rewrite of `src/lib/gemini.ts`** (3rd iteration — cleanest):
+  - NEW `callGeminiWithPdf()` — sends PDF ArrayBuffer as base64 data URI via `file_url` type
+  - Gemini natively reads PDF files — NO image conversion needed at all
+  - Removed `callGeminiVision()` and `blobToDataUri()` (no longer needed)
+  - Kept `callGemini()` as text-only fallback
+  - `extractJson()` helper retained
+  - Model: `gemini-1.5-flash-8b`
+  - Max PDF size: 20MB
+  - 120s timeout, rate limit detection, API key error handling
+
+- **Rewrote all 3 API routes** (3rd iteration — simplest):
+  - `/api/gemini/summarize/route.ts` — receives raw PDF file → `file.arrayBuffer()` → `callGeminiWithPdf()`
+  - `/api/gemini/notes/route.ts` — receives raw PDF file → `file.arrayBuffer()` → `callGeminiWithPdf()`
+  - `/api/gemini/resume/route.ts` — receives raw PDF + optional JD text → `callGeminiWithPdf()`
+  - Routes now use simple `form.get("file")` / `form.get("resume")` instead of `form.getAll("images")`
+  - All routes validate: file type, size (20MB max), FormData parsing
+  - All routes have `export const runtime = 'nodejs'`
+
+- **Simplified `src/components/tool/AIToolPage.tsx`** (3rd iteration):
+  - REMOVED `import { pdfToImages }` — no longer needed!
+  - Frontend sends raw PDF file via FormData (no client-side conversion)
+  - Single `form.append("file", file)` — that's it
+  - Resume: `form.append("resume", file)` + optional `form.append("jobDescription", ...)`
+  - Progress animation simplified: steps focus on "Gemini is reading your document..."
+  - Removed Loader2 icon (no conversion phase)
+  - Fixed `response.ok` check before `.json()` — prevents "Unexpected token" crash
+  - Error state UI with red card + "Try Again" button
+
+- **Fixed Turbopack cache issue**: Cleared `.next/cache` after rewrite
 
 Stage Summary:
-- 16 files modified to fix all build errors
-- TypeScript strict mode compliance: 0 errors
-- All 7 format converters verified working with proper imports and wiring
-- packages.json: All 10 converter packages already installed (no npm install needed)
+- **Architecture (FINAL)**: Client sends raw PDF → Server reads buffer → Gemini `file_url` base64 inlineData
+  - NO client-side PDF→image conversion
+  - NO server-side pdfjs-dist parsing
+  - PDF goes directly to Gemini as a native document
+- **Files modified**: 4 files
+  1. `src/lib/gemini.ts` — REWRITTEN (callGeminiWithPdf with file_url, removed Vision/image code)
+  2. `src/app/api/gemini/summarize/route.ts` — REWRITTEN (raw PDF in → buffer → Gemini)
+  3. `src/app/api/gemini/notes/route.ts` — REWRITTEN (raw PDF in → buffer → Gemini)
+  4. `src/app/api/gemini/resume/route.ts` — REWRITTEN (raw PDF + JD → buffer → Gemini)
+  5. `src/components/tool/AIToolPage.tsx` — SIMPLIFIED (no pdf-to-images, raw FormData)
+- `src/lib/pdf-to-images.ts` kept but no longer imported (may be useful for other tools)
+- **Simplest possible architecture**: 1 FormData field → 1 arrayBuffer → 1 Gemini call
 
 ---
 Task ID: 13
-Agent: Main Agent
-Task: Wire real-time progress callbacks from 7 format converters to UI
+Agent: Main
+Task: Add Gemini OCR toggle to PDF-to-Word + native PDF support + cleanup
 
 Work Log:
-- Added `processingStatus: string` field to Zustand store (AppState interface + state + resetToolState)
-- Added `setProcessingStatus: (status: string) => void` action to store
-- Updated `startProcessing()` to initialize `processingStatus: "Initializing..."`
-- Updated `resetTool()` to clear `processingStatus: ""`
-- Added `onProgress?: (status: string, percent: number) => void` parameter to `processTool()` in pdf-processor.ts
-- Replaced all 7 `(_status, _percent) => {}` stub callbacks with real `onProgress` parameter
-- Updated ToolPage.tsx to use `processingStatus` and `setProcessingStatus` from store
-- Added format tool detection: `formatTools` array with 7 tool IDs
-- For format tools: passes real onProgress callback that calls setProcessingStatus + setProcessingProgress + setCurrentStep
-- For non-format tools: keeps existing fake random progress animation
-- Updated progress display UI to show `processingStatus` text
+- User requested: implement native PDF support in PDF-to-Word + add "Gemini OCR" toggle
+- **Updated `src/lib/gemini.ts`**:
+  - Added `ocr` system prompt to SYSTEM_PROMPTS for PDF-to-Word OCR
+  - Updated `callGeminiWithPdf()` to handle `ocr` tool type with language via extraContext
+  - Model remains `gemini-1.5-flash-8b`
+
+- **Created `src/app/api/gemini/ocr-pdf/route.ts`** (NEW):
+  - Accepts raw PDF file + language via FormData
+  - Calls `callGeminiWithPdf()` with `tool: "ocr"` and language as extraContext
+  - Returns structured GeminiPage[] with elements per page
+  - Full validation: file type, size (20MB), proper JSON errors
+  - `export const runtime = "nodejs"`
+
+- **Complete rewrite of `src/lib/converters/pdf-to-word.ts`** (dual mode):
+  - **Gemini OCR mode** (toggle ON): Sends raw PDF to `/api/gemini/ocr-pdf`, Gemini natively reads PDF
+  - **Basic mode** (toggle OFF): Client-side text extraction using pdfjs-dist `getTextContent()`
+  - Basic mode features: heading detection by font size, line grouping, bullet/numbered list detection
+  - Both modes produce `GeminiPage[]` → same DOCX builder
+  - Response body validation before `.json()` — prevents "Unexpected token R" crash
+  - DOCX generation shared between modes (Calibri font, proper headings, bordered tables)
+
+- **Updated `src/lib/tool-configs.ts`**:
+  - Added "Gemini OCR" toggle (type: toggle, default: true) to pdf-to-word options
+  - Removed "Column Handling" radio option (simplified)
+  - Updated processing steps for dual-mode workflow
+  - Toggle hint: "AI-powered extraction (better for scanned PDFs & complex layouts)"
+
+- **Updated `src/components/tool/ToolPage.tsx`**:
+  - Processing animation now adapts to toggle state
+  - Gemini ON: Shows "Gemini AI is Analyzing" with amber/emerald spinner + Gemini badge
+  - Gemini OFF: Shows "Extracting Text" with primary spinner + "Fast Extraction / Client-Side" badge
+  - Added `Zap` to lucide-react imports
+
+- **Removed `src/lib/pdf-to-images.ts`** (no longer imported anywhere)
+
+- **Model audit**: All active code uses `gemini-1.5-flash-8b` (only commented-out code had `gemini-2.0-flash`)
+- **TypeScript check**: All new code compiles clean (only pre-existing i18n.ts error)
 
 Stage Summary:
-- 3 files modified: store.ts, pdf-processor.ts, ToolPage.tsx
-- Format tools show REAL progress: "Extracting text from page 3...", "Running OCR on page 1..."
-- Non-format tools still use fake progress animation
+- **PDF-to-Word now has 2 modes** controlled by "Gemini OCR" toggle:
+  - Gemini OCR ON (default): Native PDF → Gemini AI → structured DOCX
+  - Gemini OCR OFF: Client-side text extraction → basic DOCX
+- **Files modified**: 5 files
+  1. `src/lib/gemini.ts` — Added `ocr` prompt + handler
+  2. `src/app/api/gemini/ocr-pdf/route.ts` — NEW (native PDF OCR endpoint)
+  3. `src/lib/converters/pdf-to-word.ts` — REWRITTEN (dual mode)
+  4. `src/lib/tool-configs.ts` — Added Gemini OCR toggle
+  5. `src/components/tool/ToolPage.tsx` — Mode-aware processing animation
+- **Files removed**: `src/lib/pdf-to-images.ts`
+- **No more image conversion**: All tools use native PDF support via Gemini
+- **Error-safe**: response.ok checks prevent "Unexpected token" crashes
