@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload,
@@ -24,47 +24,50 @@ import {
   ShieldCheck,
   PenTool,
   UploadCloud,
+  BrainCircuit,
+  Briefcase,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion";
+import { Textarea } from "@/components/ui/textarea";
 import { useAppStore } from "@/lib/store";
 import { saveHistory } from "@/lib/history";
-import CloudStorageButtons from "@/components/tool/CloudStorageButtons";
-// Enhanced PDF Summary module
-import { summarizePDF } from "@/lib/pdf-summary-tool/index";
-import type { SummaryResult as EnhancedSummaryResult } from "@/lib/pdf-summary-tool/index";
 
-// Enhanced PDF Notes module
-import { generatePDFNotes } from "@/lib/pdf-notes-tool/index";
-import type { NotesResult as EnhancedNotesResult } from "@/lib/pdf-notes-tool/index";
+// ── Result Types (matching API response shapes) ──────────────────────────────
 
-// Enhanced Resume Checker module
-import { analyzeResumeATS } from "@/lib/resume-checker-tool/index";
-import type { ResumeAnalysisResult } from "@/lib/resume-checker-tool/index";
+interface SummaryResult {
+  success: boolean;
+  title: string;
+  bulletPoints: string[];
+  wordCount: number;
+  readingTime: string;
+}
 
-// Legacy types for result rendering (kept for UI compatibility)
-import { extractTextFromPDF } from "@/lib/pdf-ai-tools";
-import type {
-  SummaryResult,
-  NotesResult,
-  ResumeResult,
-} from "@/lib/pdf-ai-tools";
+interface NotesResult {
+  success: boolean;
+  title: string;
+  sections: { heading: string; content: string[] }[];
+  totalSections: number;
+  wordCount: number;
+}
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+interface ResumeResult {
+  success: boolean;
+  atsScore: number;
+  grade: string;
+  sections: { name: string; found: boolean }[];
+  keywordsFound: string[];
+  keywordsMissing: string[];
+  strengths: string[];
+  weaknesses: string[];
+  suggestions: string[];
+  stats: { totalWords: number; pageCount: number };
+  scoreBreakdown: {
+    sectionScore: number;
+    keywordScore: number;
+    structureScore: number;
+    lengthScore: number;
+  };
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -83,31 +86,36 @@ interface ToolMeta {
   actionText: string;
   maxFileSize: number;
   steps: string[];
+  engineBadge: string;
   howItWorks: { title: string; description: string; icon: React.ComponentType<{ className?: string }> }[];
   whyUse: { title: string; description: string; icon: React.ComponentType<{ className?: string }> }[];
   faq: { question: string; answer: string }[];
   freeActionLabel: string;
+  supportsDualUpload?: boolean;
+  dualUploadLabel?: string;
+  dualUploadPlaceholder?: string;
 }
 
 // ── Tool Configs ───────────────────────────────────────────────────────────
 
 const toolMetaMap: Record<ToolId, ToolMeta> = {
   "pdf-summary": {
-    title: "Summarize PDF in",
-    titleAccent: "Seconds",
+    title: "AI-Powered PDF",
+    titleAccent: "Summarizer",
     description:
-      "Upload any PDF and get an instant bullet-point summary. Perfect for research papers, reports, and long documents. No sign-up required, 100% free.",
-    badgeText: "AI-Powered",
+      "Upload any PDF and get a professional executive summary powered by Gemini AI. Perfect for research papers, reports, and long documents.",
+    badgeText: "Gemini AI",
     badgeClass: "bg-amber-100 text-amber-800 hover:bg-amber-100 border-amber-200",
     icon: Sparkles,
     color: "text-amber-600",
     bgColor: "bg-amber-50",
     actionText: "Generate Summary",
     maxFileSize: 50,
+    engineBadge: "gemini-2.0-flash",
     steps: [
-      "Reading PDF content...",
-      "Analyzing key sections...",
-      "Generating bullet points...",
+      "Uploading PDF to AI engine...",
+      "Gemini is analyzing content...",
+      "Generating professional summary...",
     ],
     howItWorks: [
       {
@@ -117,44 +125,44 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
         icon: UploadCloud,
       },
       {
-        title: "AI Summarizes",
+        title: "Gemini AI Analyzes",
         description:
-          "Text is extracted, key paragraphs scored, and important points identified.",
-        icon: Sparkles,
+          "Gemini reads the full document and identifies key themes, arguments, and conclusions.",
+        icon: BrainCircuit,
       },
       {
-        title: "Get Summary",
+        title: "Get Executive Summary",
         description:
-          "Clean, concise bullet-point summary ready to read or copy.",
+          "Professional bullet-point summary ready to read, copy, or present.",
         icon: FileSearch,
       },
     ],
     whyUse: [
-      { title: "Instant Summary", description: "Get key points in seconds, not hours.", icon: Zap },
-      { title: "100% Private", description: "Your files never leave your browser.", icon: ShieldCheck },
-      { title: "Smart Detection", description: "Automatically finds the most important content.", icon: Sparkles },
-      { title: "Free to Use", description: "5 free summaries per day.", icon: Clock },
+      { title: "AI-Powered", description: "Powered by Google Gemini for deep document understanding.", icon: Sparkles },
+      { title: "Professional Quality", description: "Executive-level summaries suitable for business and academia.", icon: ShieldCheck },
+      { title: "Multi-Language", description: "Summarizes documents in any language.", icon: Zap },
+      { title: "Instant Results", description: "Get your summary in seconds.", icon: Clock },
     ],
     faq: [
       {
-        question: "Is my PDF uploaded to any server?",
+        question: "How does the AI summarizer work?",
         answer:
-          "No. Your PDF is processed entirely in your browser. No files are uploaded to any server.",
+          "Your PDF is sent to our secure AI engine (Gemini 2.0 Flash) which reads the full content and generates a professional executive summary with key points.",
       },
       {
         question: "What types of PDFs work best?",
         answer:
-          "Text-based PDFs work best — research papers, reports, articles, and documents with clear paragraph structure.",
+          "Text-based PDFs work best — research papers, reports, articles, and documents with clear paragraph structure. Scanned PDFs may have limited accuracy.",
       },
       {
-        question: "How is the summary generated?",
+        question: "Is my data secure?",
         answer:
-          "Our algorithm scores paragraphs by sentence count, length, and key indicator words to identify the most important content.",
+          "Your PDF is processed by Gemini AI and is not stored on our servers. The analysis is generated in real-time.",
       },
       {
         question: "How many summaries can I generate?",
         answer:
-          "You get 5 free summaries per day. Each summary processes up to 50MB files.",
+          "Free users get 3 AI summaries per day. Premium users get unlimited access.",
       },
       {
         question: "Can I copy or print the summary?",
@@ -164,27 +172,28 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
       {
         question: "What languages are supported?",
         answer:
-          "Currently, English PDFs are best supported. We're working on adding more languages soon.",
+          "Gemini AI supports 40+ languages including English, Hindi, Spanish, French, German, Japanese, and many more.",
       },
     ],
-    freeActionLabel: "free summaries",
+    freeActionLabel: "free AI summaries",
   },
   "pdf-notes": {
     title: "Convert PDF to",
-    titleAccent: "Study Notes",
+    titleAccent: "AI Study Notes",
     description:
-      "Upload any PDF and get structured, easy-to-read study notes. Perfect for students, researchers, and anyone who needs organized content. No sign-up required, 100% free.",
-    badgeText: "Study Tool",
+      "Upload any PDF and get structured, exam-ready study notes powered by Gemini AI. Perfect for students, researchers, and professionals.",
+    badgeText: "Gemini AI",
     badgeClass: "bg-emerald-100 text-emerald-800 hover:bg-emerald-100 border-emerald-200",
     icon: BookOpen,
     color: "text-emerald-600",
     bgColor: "bg-emerald-50",
     actionText: "Generate Notes",
     maxFileSize: 50,
+    engineBadge: "gemini-2.0-flash",
     steps: [
-      "Reading PDF content...",
-      "Detecting headings and structure...",
-      "Creating organized notes...",
+      "Uploading PDF to AI engine...",
+      "Gemini is detecting structure...",
+      "Creating organized study notes...",
     ],
     howItWorks: [
       {
@@ -194,44 +203,44 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
         icon: UploadCloud,
       },
       {
-        title: "AI Structures",
+        title: "Gemini AI Structures",
         description:
-          "Text is extracted, sections detected, and key points highlighted.",
-        icon: BookOpen,
+          "Gemini identifies sections, key concepts, definitions, and creates logical groupings.",
+        icon: BrainCircuit,
       },
       {
         title: "Get Study Notes",
         description:
-          "Clean, organized notes with headings and bullet points.",
+          "Clean, organized notes with headings and bullet points ready for revision.",
         icon: PenTool,
       },
     ],
     whyUse: [
-      { title: "Instant Notes", description: "Structured study notes in seconds.", icon: Zap },
-      { title: "100% Private", description: "Your files never leave your browser.", icon: ShieldCheck },
-      { title: "Key Highlights", description: "Important points are auto-highlighted.", icon: PenTool },
-      { title: "Free to Use", description: "5 free generations per day.", icon: Clock },
+      { title: "AI-Powered", description: "Gemini creates smarter notes than simple text extraction.", icon: Sparkles },
+      { title: "Exam Ready", description: "Focused on key concepts, definitions, and important facts.", icon: PenTool },
+      { title: "Smart Structure", description: "Automatically detects and organizes content into sections.", icon: BookOpen },
+      { title: "Multi-Language", description: "Generate notes from documents in any language.", icon: Zap },
     ],
     faq: [
       {
-        question: "Is my PDF uploaded to any server?",
+        question: "How does the AI notes generator work?",
         answer:
-          "No. Your PDF is processed entirely in your browser. No files are uploaded to any server.",
+          "Your PDF is analyzed by Gemini AI which identifies the document structure, extracts key concepts, and creates well-organized study notes with headings and bullet points.",
       },
       {
         question: "What types of PDFs work best?",
         answer:
-          "PDFs with clear headings and structure work best — textbooks, lecture notes, research papers, and manuals.",
+          "PDFs with clear structure work best — textbooks, lecture notes, research papers, and manuals. Gemini can also organize unstructured content.",
       },
       {
         question: "How are notes structured?",
         answer:
-          "Notes are organized into sections with headings (auto-detected or created), each with up to 5 bullet points summarizing key information.",
+          "Notes are organized into logical sections with clear headings. Each section contains 3-5 key bullet points focusing on the most important concepts.",
       },
       {
         question: "How many notes can I generate?",
         answer:
-          "You get 5 free note generations per day. Each can process up to 50MB files.",
+          "Free users get 3 AI note generations per day. Premium users get unlimited access.",
       },
       {
         question: "Can I copy or print the notes?",
@@ -239,31 +248,36 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
           "Yes! Use the copy button to copy all notes to clipboard, or print the page directly.",
       },
       {
-        question: "Can I edit the generated notes?",
+        question: "What languages are supported?",
         answer:
-          "Currently, notes are generated automatically. Copy them and edit in your preferred app. We're adding inline editing soon.",
+          "Gemini AI supports 40+ languages. Upload a document in any language and get notes in the same language.",
       },
     ],
-    freeActionLabel: "free generations",
+    freeActionLabel: "free AI generations",
   },
   "resume-checker": {
-    title: "Check Your Resume",
-    titleAccent: "ATS Score",
+    title: "AI Resume",
+    titleAccent: "ATS Scorer",
     description:
-      "Upload your resume and get an instant ATS compatibility score. Detailed section analysis, keyword matching, and actionable suggestions. No sign-up required, 100% free.",
-    badgeText: "ATS Tool",
+      "Upload your resume (and job description) and get a detailed ATS compatibility score powered by Gemini AI. Includes keyword matching and improvement suggestions.",
+    badgeText: "Gemini AI",
     badgeClass: "bg-blue-100 text-blue-800 hover:bg-blue-100 border-blue-200",
     icon: UserCheck,
     color: "text-blue-600",
     bgColor: "bg-blue-50",
     actionText: "Analyze Resume",
     maxFileSize: 10,
+    engineBadge: "gemini-2.0-flash",
     steps: [
-      "Extracting resume content...",
-      "Checking sections...",
-      "Analyzing keywords...",
-      "Calculating ATS score...",
+      "Uploading resume to AI engine...",
+      "Gemini is analyzing sections...",
+      "Matching keywords and scoring...",
+      "Generating improvement report...",
     ],
+    supportsDualUpload: true,
+    dualUploadLabel: "Job Description (Optional)",
+    dualUploadPlaceholder:
+      "Paste the job description here for better keyword matching and scoring...",
     howItWorks: [
       {
         title: "Upload Resume",
@@ -272,29 +286,29 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
         icon: UploadCloud,
       },
       {
-        title: "AI Analyzes",
+        title: "Gemini AI Analyzes",
         description:
-          "Sections detected, keywords matched, and formatting checked against ATS standards.",
-        icon: UserCheck,
+          "Gemini checks sections, keywords, structure, and compares against the job description.",
+        icon: BrainCircuit,
       },
       {
         title: "Get ATS Score",
         description:
-          "Detailed score breakdown with strengths, weaknesses, and improvement tips.",
-        icon: FileSearch,
+          "Detailed score (0-100) with breakdown, strengths, weaknesses, and improvement tips.",
+        icon: Target,
       },
     ],
     whyUse: [
-      { title: "Instant Analysis", description: "Get your ATS score in seconds.", icon: Zap },
-      { title: "100% Private", description: "Your resume never leaves your browser.", icon: ShieldCheck },
-      { title: "Detailed Report", description: "Section analysis, keyword matching, and scoring.", icon: FileSearch },
-      { title: "Free to Use", description: "5 free checks per day.", icon: Clock },
+      { title: "AI-Powered", description: "Gemini provides deeper analysis than keyword matching alone.", icon: Sparkles },
+      { title: "Job Match", description: "Optionally paste a job description for targeted scoring.", icon: Briefcase },
+      { title: "Detailed Report", description: "Section analysis, keyword matching, and actionable scoring.", icon: FileSearch },
+      { title: "Actionable Tips", description: "Get specific suggestions to improve your ATS compatibility.", icon: Target },
     ],
     faq: [
       {
-        question: "Is my resume uploaded to any server?",
+        question: "How does the AI resume checker work?",
         answer:
-          "No. Your resume is processed entirely in your browser. Your data stays completely private.",
+          "Your resume is analyzed by Gemini AI which checks for standard sections, evaluates keyword relevance, assesses formatting, and compares your resume against the job description (if provided).",
       },
       {
         question: "What is ATS?",
@@ -302,27 +316,27 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
           "ATS stands for Applicant Tracking System. It's software used by employers to filter resumes. Having an ATS-friendly resume increases your chances of getting noticed.",
       },
       {
-        question: "How is the ATS score calculated?",
+        question: "Should I paste the job description?",
         answer:
-          "We check for standard sections (Summary, Skills, Experience, Education), match against 40+ ATS keywords, evaluate length, and assess formatting.",
+          "Yes! Pasting the job description gives you a much more accurate and relevant score. Without it, the tool checks general ATS compatibility.",
       },
       {
-        question: "What sections should my resume have?",
+        question: "How is the ATS score calculated?",
         answer:
-          "Key sections: Professional Summary, Skills, Work Experience, and Education. Additional sections like Certifications, Projects, and Languages boost your score.",
+          "Gemini AI evaluates 4 categories: Section Detection (0-40), Keyword Matching (0-30), Structure Check (0-20), and Length Check (0-10).",
       },
       {
         question: "Can I check multiple resumes?",
         answer:
-          "You get 5 free ATS checks per day. Upload and analyze different versions of your resume.",
+          "Free users get 3 AI checks per day. Premium users get unlimited access.",
       },
       {
         question: "How can I improve my score?",
         answer:
-          "Our analysis provides specific suggestions — add missing sections, incorporate relevant keywords, use bullet points, and keep your resume to 1-2 pages.",
+          "The AI provides specific suggestions based on your resume — add missing sections, incorporate relevant keywords, use bullet points, and tailor content to the job description.",
       },
     ],
-    freeActionLabel: "free checks",
+    freeActionLabel: "free AI checks",
   },
 };
 
@@ -347,6 +361,7 @@ export default function AIToolPage({
   const [result, setResult] =
     useState<SummaryResult | NotesResult | ResumeResult | null>(null);
   const [copied, setCopied] = useState(false);
+  const [jobDescription, setJobDescription] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -402,49 +417,74 @@ export default function AIToolPage({
     setCopied(false);
 
     try {
-      // For summary/notes, pre-extract text for validation (legacy modules handle their own extraction)
-      // For resume-checker, the enhanced module handles everything internally
-      if (toolId !== "resume-checker") {
-        const text = await extractTextFromPDF(file);
-        if (!text || text.trim().length < 50) {
-          setError(
-            "Could not extract enough text from this PDF. Please try a text-based PDF."
-          );
-          setIsProcessing(false);
-          return;
-        }
-      }
-
-      // Simulated progress
+      // Animated progress
       const steps = meta.steps;
       const stepSize = 100 / steps.length;
       let p = 0;
 
       const interval = setInterval(() => {
-        p += Math.random() * 15 + 5;
-        if (p > 90) p = 90;
+        p += Math.random() * 8 + 2;
+        if (p > 92) p = 92;
         const stepIdx = Math.min(
           Math.floor(p / stepSize),
           steps.length - 1
         );
         setCurrentStep(stepIdx);
-        setProgress(p);
-      }, 300);
+        setProgress(Math.round(p));
+      }, 400);
 
       let res: SummaryResult | NotesResult | ResumeResult;
 
       if (toolId === "pdf-summary") {
-        // Use the enhanced modular summary engine
-        const summaryResult = await summarizePDF(file);
-        res = summaryResult as unknown as SummaryResult;
+        // ── Call Gemini Summarize API ──
+        const form = new FormData();
+        form.append("file", file);
+
+        const response = await fetch("/api/gemini/summarize", {
+          method: "POST",
+          body: form,
+        });
+
+        const data = await response.json();
+        if (!data.success) {
+          throw new Error(data.error || "AI summarization failed.");
+        }
+        res = data as SummaryResult;
+
       } else if (toolId === "pdf-notes") {
-        // Use the enhanced modular notes engine
-        const notesResult = await generatePDFNotes(file);
-        res = notesResult as unknown as NotesResult;
+        // ── Call Gemini Notes API ──
+        const form = new FormData();
+        form.append("file", file);
+
+        const response = await fetch("/api/gemini/notes", {
+          method: "POST",
+          body: form,
+        });
+
+        const data = await response.json();
+        if (!data.success) {
+          throw new Error(data.error || "AI note generation failed.");
+        }
+        res = data as NotesResult;
+
       } else {
-        // Use the enhanced modular resume checker engine (handles extraction internally)
-        const resumeResult = await analyzeResumeATS(file);
-        res = resumeResult as unknown as ResumeResult;
+        // ── Call Gemini Resume API ──
+        const form = new FormData();
+        form.append("resume", file);
+        if (jobDescription.trim()) {
+          form.append("jobDescription", jobDescription.trim());
+        }
+
+        const response = await fetch("/api/gemini/resume", {
+          method: "POST",
+          body: form,
+        });
+
+        const data = await response.json();
+        if (!data.success) {
+          throw new Error(data.error || "AI resume analysis failed.");
+        }
+        res = data as ResumeResult;
       }
 
       clearInterval(interval);
@@ -452,12 +492,12 @@ export default function AIToolPage({
       setProgress(100);
       setResult(res);
 
-      // Auto-save to history (fire-and-forget, non-critical)
+      // Auto-save to history
       if (file) {
         const toolNames: Record<string, string> = {
-          "pdf-summary": "PDF Summary",
-          "pdf-notes": "PDF Notes",
-          "resume-checker": "Resume ATS Checker",
+          "pdf-summary": "PDF Summary (Gemini AI)",
+          "pdf-notes": "PDF Notes (Gemini AI)",
+          "resume-checker": "Resume ATS Checker (Gemini AI)",
         };
         let summary = "";
         if (toolId === "pdf-summary") {
@@ -504,7 +544,7 @@ export default function AIToolPage({
       const sectionsFound = r.sections.filter((s) => s.found).map((s) => s.name);
       const sectionsMissing = r.sections.filter((s) => !s.found).map((s) => s.name);
       textToCopy = `Resume ATS Score: ${r.atsScore}/100 (Grade ${r.grade})\n\n` +
-        `Stats: ${r.stats.pageCount} pages, ${r.stats.totalWords} words, ${sectionsFound.length}/${r.sections.length} sections, ${r.keywordsFound.length}/${r.keywordsFound.length + r.keywordsMissing.length} keywords\n\n` +
+        `Stats: ${r.stats.pageCount} pages, ${r.stats.totalWords} words, ${sectionsFound.length}/${r.sections.length} sections\n\n` +
         `Sections Found: ${sectionsFound.join(", ")}\n` +
         (sectionsMissing.length > 0 ? `Missing Sections: ${sectionsMissing.join(", ")}\n` : "") +
         `\nStrengths:\n${r.strengths.map((s) => `• ${s}`).join("\n")}\n\n` +
@@ -528,6 +568,7 @@ export default function AIToolPage({
     setProgress(0);
     setCurrentStep(0);
     setCopied(false);
+    setJobDescription("");
   };
 
   // ── Score helpers ──
@@ -543,8 +584,59 @@ export default function AIToolPage({
     return "stroke-red-500";
   };
 
-  // ── Render helpers ──
+  // ── Render: Gemini AI Processing Animation ──
+  const renderProcessing = () => (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className="bg-card border border-border rounded-2xl p-8 shadow-sm"
+    >
+      <div className="flex flex-col items-center text-center space-y-6">
+        {/* Dual rotating rings */}
+        <div className="relative w-24 h-24">
+          <div className="absolute inset-0 rounded-full border-[3px] border-muted animate-[spin_3s_linear_infinite]" />
+          <div className="absolute inset-2 rounded-full border-[3px] border-primary/40 animate-[spin_2s_linear_infinite_reverse]" />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <BrainCircuit className="w-10 h-10 text-primary animate-pulse" />
+          </div>
+        </div>
 
+        {/* Step text */}
+        <div>
+          <p className="text-lg font-bold text-foreground">Gemini AI is Analyzing</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            {meta.steps[currentStep] || "Processing..."}
+          </p>
+        </div>
+
+        {/* Progress bar */}
+        <div className="w-full max-w-xs">
+          <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+            <motion.div
+              className="h-full bg-gradient-to-r from-primary/80 to-primary rounded-full"
+              initial={{ width: 0 }}
+              animate={{ width: `${progress}%` }}
+              transition={{ duration: 0.3 }}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">{progress}%</p>
+        </div>
+
+        {/* Engine badges */}
+        <div className="flex items-center gap-2 flex-wrap justify-center">
+          <Badge variant="outline" className="text-xs gap-1">
+            <Sparkles className="w-3 h-3 text-amber-500" />
+            Gemini AI
+          </Badge>
+          <Badge variant="outline" className="text-xs font-mono">
+            {meta.engineBadge}
+          </Badge>
+        </div>
+      </div>
+    </motion.div>
+  );
+
+  // ── Render: Summary Result ──
   const renderSummaryResult = () => {
     const r = result as SummaryResult;
     return (
@@ -572,6 +664,10 @@ export default function AIToolPage({
               </span>
             </div>
           </div>
+          <Badge variant="outline" className="text-xs gap-1 self-start">
+            <Sparkles className="w-3 h-3 text-amber-500" />
+            Powered by Gemini AI
+          </Badge>
         </div>
 
         {/* Key Points */}
@@ -598,11 +694,7 @@ export default function AIToolPage({
 
         {/* Actions */}
         <div className="flex flex-col sm:flex-row gap-2 pt-2">
-          <Button
-            variant="outline"
-            className="gap-2"
-            onClick={handleCopy}
-          >
+          <Button variant="outline" className="gap-2" onClick={handleCopy}>
             {copied ? (
               <Check className="w-4 h-4 text-emerald-500" />
             ) : (
@@ -619,6 +711,7 @@ export default function AIToolPage({
     );
   };
 
+  // ── Render: Notes Result ──
   const renderNotesResult = () => {
     const r = result as NotesResult;
     return (
@@ -652,10 +745,13 @@ export default function AIToolPage({
                 <FileSearch className="w-3.5 h-3.5" />
                 {r.wordCount.toLocaleString()} words
               </span>
+              <Badge variant="outline" className="text-xs gap-1">
+                <Sparkles className="w-3 h-3 text-emerald-500" />
+                Gemini AI
+              </Badge>
             </div>
           </div>
 
-          {/* Action buttons */}
           <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-border">
             <Button variant="outline" size="sm" className="gap-1.5" onClick={handleCopy}>
               {copied ? (
@@ -682,7 +778,6 @@ export default function AIToolPage({
               transition={{ delay: i * 0.06 }}
               className="bg-card border border-border rounded-xl p-4 sm:p-5 shadow-sm hover:shadow-md transition-shadow"
             >
-              {/* Section heading */}
               <div className="flex items-center gap-2.5 mb-3 pb-2.5 border-b border-border">
                 <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-primary/10 text-primary text-xs font-bold flex-shrink-0">
                   {i + 1}
@@ -692,7 +787,6 @@ export default function AIToolPage({
                 </h4>
               </div>
 
-              {/* Bullet points */}
               <ul className="space-y-2 ml-1">
                 {section.content.map((point, j) => (
                   <motion.li
@@ -714,10 +808,10 @@ export default function AIToolPage({
     );
   };
 
+  // ── Render: Resume Result ──
   const renderResumeResult = () => {
     const r = result as ResumeResult;
-    const resumeData = result as unknown as ResumeResult & { scoreBreakdown?: { sectionScore: number; keywordScore: number; structureScore: number; lengthScore: number } };
-    const breakdown = resumeData.scoreBreakdown;
+    const breakdown = r.scoreBreakdown;
     const sectionsFound = r.sections.filter((s) => s.found);
     const sectionsMissing = r.sections.filter((s) => !s.found);
 
@@ -728,9 +822,15 @@ export default function AIToolPage({
         className="bg-card border border-border rounded-2xl p-6 shadow-sm space-y-6"
       >
         {/* Header */}
-        <div className="flex items-center gap-2 mb-1">
-          <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-          <h3 className="text-lg font-bold">Resume Analyzed!</h3>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+            <h3 className="text-lg font-bold">Resume Analyzed!</h3>
+          </div>
+          <Badge variant="outline" className="text-xs gap-1">
+            <Sparkles className="w-3 h-3 text-blue-500" />
+            Gemini AI
+          </Badge>
         </div>
 
         {/* Score circle */}
@@ -824,36 +924,15 @@ export default function AIToolPage({
           </p>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
-              {
-                label: "Pages",
-                value: r.stats.pageCount,
-                icon: FileText,
-              },
-              {
-                label: "Words",
-                value: r.stats.totalWords.toLocaleString(),
-                icon: Hash,
-              },
-              {
-                label: "Sections",
-                value: `${sectionsFound.length}/${r.sections.length}`,
-                icon: BookMarked,
-              },
-              {
-                label: "Keywords",
-                value: `${r.keywordsFound.length}/${r.keywordsFound.length + r.keywordsMissing.length}`,
-                icon: Target,
-              },
+              { label: "Pages", value: r.stats.pageCount, icon: FileText },
+              { label: "Words", value: r.stats.totalWords.toLocaleString(), icon: Hash },
+              { label: "Sections", value: `${sectionsFound.length}/${r.sections.length}`, icon: BookMarked },
+              { label: "Keywords", value: `${r.keywordsFound.length}/${r.keywordsFound.length + r.keywordsMissing.length}`, icon: Target },
             ].map((stat) => (
-              <div
-                key={stat.label}
-                className="rounded-xl border border-border bg-muted/50 p-3 text-center"
-              >
+              <div key={stat.label} className="rounded-xl border border-border bg-muted/50 p-3 text-center">
                 <stat.icon className="w-4 h-4 text-muted-foreground mx-auto mb-1" />
                 <p className="text-lg font-bold leading-none">{stat.value}</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {stat.label}
-                </p>
+                <p className="text-xs text-muted-foreground mt-1">{stat.label}</p>
               </div>
             ))}
           </div>
@@ -868,10 +947,7 @@ export default function AIToolPage({
             </p>
             <div className="space-y-1.5">
               {sectionsFound.map((s, i) => (
-                <div
-                  key={i}
-                  className="flex items-center gap-2 text-sm"
-                >
+                <div key={i} className="flex items-center gap-2 text-sm">
                   <span className="text-emerald-500">&#10003;</span>
                   <span>{s.name}</span>
                 </div>
@@ -886,10 +962,7 @@ export default function AIToolPage({
               </p>
               <div className="space-y-1.5">
                 {sectionsMissing.map((s, i) => (
-                  <div
-                    key={i}
-                    className="flex items-center gap-2 text-sm"
-                  >
+                  <div key={i} className="flex items-center gap-2 text-sm">
                     <span className="text-red-500">&#10007;</span>
                     <span className="text-muted-foreground">{s.name}</span>
                   </div>
@@ -909,11 +982,7 @@ export default function AIToolPage({
               </p>
               <div className="flex flex-wrap gap-1.5">
                 {r.keywordsFound.map((kw, i) => (
-                  <Badge
-                    key={i}
-                    variant="secondary"
-                    className="rounded-full text-xs bg-emerald-50 text-emerald-700"
-                  >
+                  <Badge key={i} variant="secondary" className="rounded-full text-xs bg-emerald-50 text-emerald-700">
                     {kw}
                   </Badge>
                 ))}
@@ -927,19 +996,12 @@ export default function AIToolPage({
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   {r.keywordsMissing.slice(0, 15).map((kw, i) => (
-                    <Badge
-                      key={i}
-                      variant="outline"
-                      className="rounded-full text-xs text-red-500 border-red-200"
-                    >
+                    <Badge key={i} variant="outline" className="rounded-full text-xs text-red-500 border-red-200">
                       {kw}
                     </Badge>
                   ))}
                   {r.keywordsMissing.length > 15 && (
-                    <Badge
-                      variant="outline"
-                      className="rounded-full text-xs text-muted-foreground border-border"
-                    >
+                    <Badge variant="outline" className="rounded-full text-xs text-muted-foreground border-border">
                       +{r.keywordsMissing.length - 15} more
                     </Badge>
                   )}
@@ -952,15 +1014,10 @@ export default function AIToolPage({
         {/* Strengths / Weaknesses */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <p className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-2">
-              Strengths
-            </p>
+            <p className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-2">Strengths</p>
             <ul className="space-y-1.5">
               {r.strengths.map((s, i) => (
-                <li
-                  key={i}
-                  className="flex items-start gap-2 text-sm"
-                >
+                <li key={i} className="flex items-start gap-2 text-sm">
                   <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
                   <span>{s}</span>
                 </li>
@@ -968,15 +1025,10 @@ export default function AIToolPage({
             </ul>
           </div>
           <div>
-            <p className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-2">
-              Weaknesses
-            </p>
+            <p className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-2">Weaknesses</p>
             <ul className="space-y-1.5">
               {r.weaknesses.map((w, i) => (
-                <li
-                  key={i}
-                  className="flex items-start gap-2 text-sm"
-                >
+                <li key={i} className="flex items-start gap-2 text-sm">
                   <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-500 flex-shrink-0" />
                   <span>{w}</span>
                 </li>
@@ -994,10 +1046,7 @@ export default function AIToolPage({
             </p>
             <ul className="space-y-1.5">
               {r.suggestions.map((s, i) => (
-                <li
-                  key={i}
-                  className="flex items-start gap-2 text-sm"
-                >
+                <li key={i} className="flex items-start gap-2 text-sm">
                   <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-primary flex-shrink-0" />
                   <span>{s}</span>
                 </li>
@@ -1009,11 +1058,7 @@ export default function AIToolPage({
         {/* Actions */}
         <div className="flex flex-col sm:flex-row gap-2 pt-2">
           <Button variant="outline" className="gap-2" onClick={handleCopy}>
-            {copied ? (
-              <Check className="w-4 h-4 text-emerald-500" />
-            ) : (
-              <Copy className="w-4 h-4" />
-            )}
+            {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
             {copied ? "Copied!" : "Copy Report"}
           </Button>
           <Button variant="ghost" className="gap-2" onClick={handleReset}>
@@ -1077,383 +1122,231 @@ export default function AIToolPage({
                 <Sparkles className="w-3 h-3 mr-1" />
                 {meta.badgeText}
               </Badge>
-              <Badge variant="secondary" className="text-xs font-medium rounded-full px-3.5 py-1 bg-muted text-muted-foreground hover:bg-muted border border-border">
-                5 {meta.freeActionLabel} left today
+              <Badge variant="outline" className="text-xs font-mono rounded-full px-3.5 py-1">
+                {meta.engineBadge}
               </Badge>
             </div>
           </motion.div>
         </div>
       </section>
 
-      {/* ── Upload / Process / Results Section ── */}
-      <section className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 pb-16">
+      {/* ── Upload / Result Section ── */}
+      <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pb-16">
         <AnimatePresence mode="wait">
-          {/* ── Upload + Process (not processing, no result) ── */}
-          {!isProcessing && !result && (
-            <motion.div
-              key="upload"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              transition={{ delay: 0.2 }}
-              className="space-y-4"
-            >
-              {/* Drop zone (no file) */}
-              {!file && (
-                <div
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setIsDragOver(true);
-                  }}
-                  onDragLeave={() => setIsDragOver(false)}
-                  onDrop={handleDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                  className={`relative rounded-xl border-2 border-dashed p-10 sm:p-14 text-center cursor-pointer transition-all bg-card ${
-                    isDragOver
-                      ? "border-primary/50 bg-primary/5"
-                      : "border-border hover:border-primary/30"
-                  }`}
-                >
-                  <div className="flex flex-col items-center gap-4">
-                    <div
-                      className={`w-14 h-14 rounded-xl flex items-center justify-center transition-colors ${
-                        isDragOver ? "bg-primary/10" : "bg-muted/50"
-                      }`}
-                    >
-                      <Upload
-                        className={`w-7 h-7 transition-colors ${
-                          isDragOver ? "text-primary" : "text-primary/70"
-                        }`}
-                      />
-                    </div>
-                    <div>
-                      <p className="text-base font-semibold mb-1 text-foreground">
-                        {isDragOver
-                          ? "Drop your PDF here"
-                          : "Drop your PDF here or "}
-                        {!isDragOver && (
-                          <button
-                            type="button"
-                            className="text-primary hover:text-primary/80 font-semibold underline underline-offset-2"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              fileInputRef.current?.click();
-                            }}
-                          >
-                            browse
-                          </button>
-                        )}
-                      </p>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      PDF files up to {meta.maxFileSize}MB supported.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Cloud Storage Import Buttons — ALWAYS visible */}
-              <div className="flex items-center gap-3 justify-center">
-                <span className="text-xs text-muted-foreground whitespace-nowrap">or import from</span>
-                <CloudStorageButtons
-                  mode="upload"
-                  onFilesSelected={(files) => {
-                    if (files.length > 0) handleFileSelection(files[0]);
-                  }}
-                />
-              </div>
-
-              {/* File card (after upload) */}
-              {file && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="p-4 rounded-xl border border-border bg-card shadow-sm"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-lg bg-primary/5 flex items-center justify-center flex-shrink-0">
-                      <FileText className="w-5 h-5 text-primary" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate text-foreground">
-                        {file.name}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {formatFileSize(file.size)}
-                      </p>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={removeFile}
-                    >
-                      <X className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </motion.div>
-              )}
-
-              {/* Error */}
-              {error && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="p-3 rounded-lg bg-red-50 text-red-600 text-sm flex items-center gap-2 border border-red-100"
-                >
-                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                  {error}
-                </motion.div>
-              )}
-
-              {/* Action button - always visible, disabled when no file */}
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="pt-3 space-y-2"
-              >
-                <Button
-                  size="lg"
-                  className={`w-full h-12 text-base font-semibold gap-2 rounded-xl ${file ? "shadow-lg shadow-primary/20 hover:shadow-primary/30" : "opacity-50 cursor-not-allowed"}`}
-                  disabled={!file || isProcessing}
-                  onClick={handleProcess}
-                >
-                  <Sparkles className="w-5 h-5" />
-                  {meta.actionText}
-                </Button>
-                {file && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="w-full text-muted-foreground"
-                    onClick={removeFile}
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 mr-1" />
-                    Reset &amp; Upload Different File
-                  </Button>
-                )}
-              </motion.div>
-            </motion.div>
-          )}
-
           {/* ── Processing State ── */}
           {isProcessing && (
             <motion.div
               key="processing"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="text-center py-16"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
             >
-              {/* Spinner */}
-              <div className="relative w-24 h-24 mx-auto mb-8">
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{
-                    duration: 2,
-                    repeat: Infinity,
-                    ease: "linear",
-                  }}
-                  className="absolute inset-0 rounded-full border-4 border-border border-t-primary"
-                />
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <ToolIcon className={`w-8 h-8 ${meta.color}`} />
-                </div>
-              </div>
-
-              <h2 className="text-xl font-semibold mb-2 text-foreground">
-                {meta.actionText}&hellip;
-              </h2>
-
-              {/* Steps */}
-              <div className="max-w-md mx-auto mb-6">
-                {meta.steps.map((step, i) => (
-                  <motion.div
-                    key={i}
-                    initial={{ opacity: 0.3 }}
-                    animate={{ opacity: i <= currentStep ? 1 : 0.3 }}
-                    className="flex items-center gap-3 py-1.5"
-                  >
-                    {i < currentStep ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                    ) : i === currentStep ? (
-                      <motion.div
-                        animate={{ scale: [1, 1.2, 1] }}
-                        transition={{ duration: 1, repeat: Infinity }}
-                      >
-                        <div className="w-4 h-4 rounded-full border-2 border-primary border-t-transparent flex-shrink-0" />
-                      </motion.div>
-                    ) : (
-                      <div className="w-4 h-4 rounded-full border-2 border-border flex-shrink-0" />
-                    )}
-                    <span
-                      className={`text-sm ${
-                        i <= currentStep
-                          ? "font-medium text-foreground"
-                          : "text-muted-foreground"
-                      }`}
-                    >
-                      {step}
-                    </span>
-                  </motion.div>
-                ))}
-              </div>
-
-              {/* Progress bar */}
-              <div className="max-w-md mx-auto">
-                <Progress value={progress} className="h-2 mb-2" />
-                <p className="text-sm text-muted-foreground">
-                  {Math.round(progress)}% complete
-                </p>
-              </div>
+              {renderProcessing()}
             </motion.div>
           )}
 
-          {/* ── Results ── */}
-          {result && !isProcessing && (
+          {/* ── Result State ── */}
+          {!isProcessing && result && (
             <motion.div
               key="result"
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="max-w-3xl mx-auto"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
             >
               {toolId === "pdf-summary" && renderSummaryResult()}
               {toolId === "pdf-notes" && renderNotesResult()}
               {toolId === "resume-checker" && renderResumeResult()}
             </motion.div>
           )}
+
+          {/* ── Upload State ── */}
+          {!isProcessing && !result && (
+            <motion.div
+              key="upload"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="space-y-6"
+            >
+              {/* Error message */}
+              {error && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="flex items-center gap-2 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm"
+                >
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{error}</span>
+                  <button onClick={() => setError(null)} className="ml-auto">
+                    <X className="w-4 h-4" />
+                  </button>
+                </motion.div>
+              )}
+
+              {/* File upload area */}
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragOver(true);
+                }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className={`
+                  relative cursor-pointer rounded-2xl border-2 border-dashed p-10 sm:p-12
+                  text-center transition-all duration-200
+                  ${isDragOver
+                    ? "border-primary bg-primary/5 scale-[1.01]"
+                    : "border-muted-foreground/25 hover:border-primary/50 hover:bg-muted/50"
+                  }
+                  ${file ? "border-primary/30 bg-primary/5" : ""}
+                `}
+              >
+                {file ? (
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center">
+                      <FileText className="w-6 h-6 text-primary" />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-foreground">{file.name}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {(file.size / (1024 * 1024)).toFixed(2)} MB
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeFile();
+                      }}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Remove
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-3">
+                    <div className={`w-14 h-14 rounded-2xl ${meta.bgColor} flex items-center justify-center`}>
+                      <Upload className={`w-7 h-7 ${meta.color}`} />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-foreground">
+                        Drag & drop your PDF here
+                      </p>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        or click to browse — max {meta.maxFileSize} MB
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Dual upload: Job Description (Resume Checker only) */}
+              {toolId === "resume-checker" && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.2 }}
+                  className="space-y-2"
+                >
+                  <label className="flex items-center gap-2 text-sm font-medium">
+                    <Briefcase className="w-4 h-4 text-muted-foreground" />
+                    {meta.dualUploadLabel}
+                  </label>
+                  <Textarea
+                    value={jobDescription}
+                    onChange={(e) => setJobDescription(e.target.value)}
+                    placeholder={meta.dualUploadPlaceholder}
+                    className="min-h-[120px] resize-y"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Paste a job description for more accurate keyword matching and scoring.
+                  </p>
+                </motion.div>
+              )}
+
+              {/* Action button */}
+              <div className="flex justify-center">
+                <Button
+                  size="lg"
+                  className="gap-2 px-8"
+                  disabled={!file}
+                  onClick={handleProcess}
+                >
+                  <ToolIcon className="w-5 h-5" />
+                  {meta.actionText}
+                </Button>
+              </div>
+            </motion.div>
+          )}
         </AnimatePresence>
-      </section>
 
-      {/* ── How It Works Section ── */}
-      <section className="bg-muted/50 border-y border-border">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-16 sm:py-20">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-center mb-12"
-          >
-            <h2 className="text-2xl sm:text-3xl font-bold text-foreground mb-2">
-              How It Works
-            </h2>
-            <p className="text-muted-foreground">
-              Three simple steps to get your results
-            </p>
-          </motion.div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 sm:gap-8">
-            {meta.howItWorks.map((item, i) => {
-              const StepIcon = item.icon;
-              return (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ delay: i * 0.1 }}
-                  className="text-center"
-                >
-                  <div className="w-14 h-14 rounded-2xl bg-card border border-border shadow-sm flex items-center justify-center mx-auto mb-4">
-                    <StepIcon className="w-6 h-6 text-primary" />
-                  </div>
-                  <div className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-primary/10 text-primary text-xs font-bold mb-3">
-                    {i + 1}
-                  </div>
-                  <h3 className="font-bold text-foreground mb-2">{item.title}</h3>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {item.description}
-                  </p>
-                </motion.div>
-              );
-            })}
+        {/* ── How It Works ── */}
+        <div className="mt-16">
+          <h2 className="text-xl sm:text-2xl font-bold text-center mb-8">How It Works</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            {meta.howItWorks.map((item, i) => (
+              <motion.div
+                key={i}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.1 + i * 0.1 }}
+                className="text-center p-5 rounded-xl border border-border bg-card"
+              >
+                <div className={`w-12 h-12 rounded-xl ${meta.bgColor} flex items-center justify-center mx-auto mb-3`}>
+                  <item.icon className={`w-6 h-6 ${meta.color}`} />
+                </div>
+                <h3 className="font-semibold mb-1">{item.title}</h3>
+                <p className="text-sm text-muted-foreground">{item.description}</p>
+              </motion.div>
+            ))}
           </div>
         </div>
-      </section>
 
-      {/* ── Why Use Section ── */}
-      <section className="bg-background">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-16 sm:py-20">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-center mb-12"
-          >
-            <h2 className="text-2xl sm:text-3xl font-bold text-foreground mb-2">
-              Why Use {meta.badgeText}?
-            </h2>
-            <p className="text-muted-foreground">
-              Built for speed, privacy, and quality
-            </p>
-          </motion.div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-            {meta.whyUse.map((item, i) => {
-              const FeatureIcon = item.icon;
-              return (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ delay: i * 0.08 }}
-                  className="rounded-2xl border border-border bg-card p-6 shadow-sm hover:shadow-md transition-shadow"
-                >
-                  <div className="w-10 h-10 rounded-xl bg-primary/5 flex items-center justify-center mb-4">
-                    <FeatureIcon className="w-5 h-5 text-primary" />
-                  </div>
-                  <h3 className="font-bold text-foreground mb-1.5">{item.title}</h3>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {item.description}
-                  </p>
-                </motion.div>
-              );
-            })}
+        {/* ── Why Use ── */}
+        <div className="mt-12">
+          <h2 className="text-xl sm:text-2xl font-bold text-center mb-8">Why Use This Tool?</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {meta.whyUse.map((item, i) => (
+              <motion.div
+                key={i}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.1 + i * 0.05 }}
+                className="flex items-start gap-3 p-4 rounded-xl border border-border bg-card"
+              >
+                <item.icon className={`w-5 h-5 ${meta.color} flex-shrink-0 mt-0.5`} />
+                <div>
+                  <p className="font-semibold text-sm">{item.title}</p>
+                  <p className="text-sm text-muted-foreground">{item.description}</p>
+                </div>
+              </motion.div>
+            ))}
           </div>
         </div>
-      </section>
 
-      {/* ── FAQ Section ── */}
-      <section className="bg-muted/50 border-t border-border">
-        <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-16 sm:py-20">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-center mb-10"
-          >
-            <h2 className="text-2xl sm:text-3xl font-bold text-foreground mb-2">
-              Frequently Asked Questions
-            </h2>
-            <p className="text-muted-foreground">
-              Everything you need to know about {meta.badgeText}
-            </p>
-          </motion.div>
-
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-          >
-            <Accordion type="single" collapsible className="w-full">
-              {meta.faq.map((item, i) => (
-                <AccordionItem
-                  key={i}
-                  value={`faq-${i}`}
-                  className="bg-card border border-border rounded-xl px-5 mb-3 last:mb-0 shadow-sm"
-                >
-                  <AccordionTrigger className="text-sm sm:text-base font-semibold text-foreground hover:no-underline py-4">
-                    {item.question}
-                  </AccordionTrigger>
-                  <AccordionContent className="text-sm text-foreground/60 leading-relaxed">
-                    {item.answer}
-                  </AccordionContent>
-                </AccordionItem>
-              ))}
-            </Accordion>
-          </motion.div>
+        {/* ── FAQ ── */}
+        <div className="mt-12">
+          <h2 className="text-xl sm:text-2xl font-bold text-center mb-8">Frequently Asked Questions</h2>
+          <div className="space-y-3 max-w-2xl mx-auto">
+            {meta.faq.map((item, i) => (
+              <details key={i} className="group rounded-xl border border-border bg-card">
+                <summary className="flex items-center justify-between cursor-pointer p-4 text-sm font-medium hover:text-primary transition-colors">
+                  {item.question}
+                  <span className="text-muted-foreground group-open:rotate-180 transition-transform">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </span>
+                </summary>
+                <div className="px-4 pb-4 text-sm text-muted-foreground leading-relaxed">
+                  {item.answer}
+                </div>
+              </details>
+            ))}
+          </div>
         </div>
       </section>
     </div>

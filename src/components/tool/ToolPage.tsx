@@ -24,6 +24,7 @@ import {
   FileSpreadsheet,
   FileUp,
   Package,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -986,8 +987,97 @@ export default function ToolPage() {
             </motion.div>
           )}
 
+          {/* AI-Powered Processing State for PDF-to-Word */}
+          {isProcessing && selectedToolId === "pdf-to-word" && (
+            <motion.div
+              key="ai-processing"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="text-center py-16"
+            >
+              {/* Gemini AI Logo Animation */}
+              <div className="relative w-28 h-28 mx-auto mb-8">
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                  className="absolute inset-0 rounded-full border-[3px] border-muted border-t-amber-500"
+                />
+                <motion.div
+                  animate={{ rotate: -360 }}
+                  transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
+                  className="absolute inset-2 rounded-full border-2 border-muted border-b-emerald-500"
+                />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="relative">
+                    <Sparkles className="w-10 h-10 text-amber-500" />
+                    <motion.div
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.5, 1, 0.5] }}
+                      transition={{ duration: 2, repeat: Infinity }}
+                      className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <h2 className="text-xl font-bold mb-2">Gemini AI is Analyzing</h2>
+              <p className="text-sm text-muted-foreground mb-6 max-w-sm mx-auto">
+                AI engine is reading every page, detecting layout, and extracting text with precision...
+              </p>
+
+              {/* Premium badges */}
+              <div className="flex items-center justify-center gap-3 mb-6">
+                <Badge variant="secondary" className="text-xs gap-1">
+                  <Sparkles className="w-3 h-3" />
+                  Gemini 1.5 Flash
+                </Badge>
+                <Badge variant="outline" className="text-xs">
+                  Zero Limits
+                </Badge>
+                <Badge variant="outline" className="text-xs">
+                  Adobe-Quality
+                </Badge>
+              </div>
+
+              {/* Step-by-step progress */}
+              <div className="max-w-md mx-auto mb-6">
+                {config.processingSteps.map((step, i) => (
+                  <motion.div
+                    key={i}
+                    initial={{ opacity: 0.3 }}
+                    animate={{ opacity: i <= currentStep ? 1 : 0.3 }}
+                    className="flex items-center gap-3 py-1.5"
+                  >
+                    {i < currentStep ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                    ) : i === currentStep ? (
+                      <motion.div
+                        animate={{ scale: [1, 1.2, 1] }}
+                        transition={{ duration: 1, repeat: Infinity }}
+                      >
+                        <div className="w-4 h-4 rounded-full border-2 border-amber-500 border-t-transparent flex-shrink-0" />
+                      </motion.div>
+                    ) : (
+                      <div className="w-4 h-4 rounded-full border-2 border-muted flex-shrink-0" />
+                    )}
+                    <span className={`text-sm ${i <= currentStep ? "font-medium" : "text-muted-foreground"}`}>
+                      {step}
+                    </span>
+                  </motion.div>
+                ))}
+              </div>
+
+              <div className="max-w-md mx-auto">
+                <Progress value={processingProgress} className="h-2 mb-2" />
+                <p className="text-sm text-muted-foreground">
+                  {processingStatus ? processingStatus : `${Math.round(processingProgress)}% complete`}
+                </p>
+              </div>
+            </motion.div>
+          )}
+
           {/* Processing State */}
-          {isProcessing && (
+          {isProcessing && selectedToolId !== "pdf-to-word" && (
             <motion.div
               key="processing"
               initial={{ opacity: 0, y: 20 }}
@@ -1137,7 +1227,14 @@ export default function ToolPage() {
                     onClick={handleDownload}
                   >
                     <Download className="w-5 h-5" />
-                    {config.outputLabel || "Download File"}
+                    {(() => {
+                      if (selectedToolId === "pdf-to-jpg") {
+                        const ext = processResult?.outputFiles[0]?.name?.split(".").pop()?.toLowerCase();
+                        if (ext === "zip") return "Download All as ZIP";
+                        return "Download Image";
+                      }
+                      return config.outputLabel || "Download File";
+                    })()}
                   </Button>
                 )}
                 <Button
