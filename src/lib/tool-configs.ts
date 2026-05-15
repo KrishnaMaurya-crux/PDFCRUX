@@ -370,15 +370,11 @@ export const toolConfigs: Record<string, ToolConfig> = {
     uploadSubtitle: "Powered by Gemini AI — Convert any PDF (even scanned) to a fully editable Word document. No size limits, no page limits.",
     options: [
       {
-        id: "columns",
-        label: "Column Handling",
-        type: "radio",
-        defaultValue: "auto",
-        options: [
-          { label: "Auto-detect columns", value: "auto", description: "Smart detection of single/multi-column layouts" },
-          { label: "Single column", value: "single", description: "Flow all text into one column" },
-          { label: "Keep original columns", value: "keep", description: "Preserve original multi-column layout" },
-        ],
+        id: "gemini-ocr",
+        label: "Gemini OCR",
+        type: "toggle",
+        defaultValue: true,
+        hint: "AI-powered extraction (better for scanned PDFs & complex layouts). Turn off for fast basic extraction.",
       },
       {
         id: "language",
@@ -404,7 +400,7 @@ export const toolConfigs: Record<string, ToolConfig> = {
         ],
       },
     ],
-    processingSteps: ["Loading PDF...", "Rendering pages...", "Gemini AI analyzing...", "Building Word document...", "Finalizing..."],
+    processingSteps: ["Loading PDF...", "AI analyzing document...", "Extracting structure...", "Building Word document...", "Finalizing..."],
     processButtonText: "Convert to Word",
     outputDescription: "Your PDF has been converted to a fully editable Word document using AI.",
     outputExtension: ".docx",

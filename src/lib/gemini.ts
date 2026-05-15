@@ -1,8 +1,15 @@
 /**
- * Shared Gemini AI Engine
+ * Shared Gemini AI Engine for PdfCrux
  *
  * Central utility for all Gemini API interactions across PdfCrux AI tools.
- * Uses z-ai-web-dev-sdk for API calls with gemini-2.0-flash model.
+ * Uses z-ai-web-dev-sdk for API calls with gemini-1.5-flash-8b model.
+ *
+ * Uses Gemini's native PDF support via `file_url` type with base64 data URIs.
+ * PDF buffers are sent directly — NO image conversion needed.
+ *
+ * Two calling modes:
+ *  1. callGeminiWithPdf() — Sends PDF file buffer directly to Gemini Vision via inlineData
+ *  2. callGemini()        — Text-only prompt → Gemini (fallback / other uses)
  *
  * Each tool has its own SYSTEM_PROMPT defined here.
  */
@@ -13,18 +20,22 @@ import ZAI from "z-ai-web-dev-sdk";
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-2.0-flash";
-const GEMINI_TIMEOUT_MS = 90_000; // 90 seconds for text analysis
+const GEMINI_MODEL = "gemini-1.5-flash-8b";
+const GEMINI_TIMEOUT_MS = 120_000; // 120 seconds for PDF analysis
+const TEXT_TIMEOUT_MS = 90_000; // 90 seconds for text-only analysis
+
+// Maximum PDF size: 20 MB (Vercel limit is 4.5 MB for body, but we buffer)
+const MAX_PDF_SIZE = 20 * 1024 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // System Prompts — One per tool
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SYSTEM_PROMPTS = {
-  summarize: `You are an expert document summarizer for PdfCrux. Your job is to analyze the provided PDF text and create a Professional Executive Summary.
+  summarize: `You are an expert document summarizer for PdfCrux. Your job is to analyze the provided PDF document and create a Professional Executive Summary.
 
 RULES:
-1. Read the entire text carefully.
+1. Read the entire PDF carefully — extract all text content.
 2. Identify the main topic, key arguments, conclusions, and supporting evidence.
 3. Generate 7-12 bullet points that capture the essence of the document.
 4. Each bullet should be concise (1-2 sentences), informative, and stand alone.
@@ -40,17 +51,18 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   "readingTime": "X min read"
 }`,
 
-  notes: `You are an expert study notes creator for PdfCrux. Your job is to convert the provided PDF text into well-structured, exam-ready Study Notes.
+  notes: `You are an expert study notes creator for PdfCrux. Your job is to analyze the provided PDF document and convert it into well-structured, exam-ready Study Notes.
 
 RULES:
-1. Analyze the document structure and identify logical sections/topics.
-2. Create clear, descriptive headings for each section.
-3. Under each heading, extract 3-5 key bullet points.
-4. Each bullet should be a complete, self-contained fact or concept.
-5. Prioritize definitions, formulas, key concepts, important dates/names, and conclusions.
-6. Maintain the original reading order.
-7. If no clear sections exist, create logical groupings.
-8. Use simple, clear language suitable for revision.
+1. Read the entire PDF carefully — extract all text content.
+2. Analyze the document structure and identify logical sections/topics.
+3. Create clear, descriptive headings for each section.
+4. Under each heading, extract 3-5 key bullet points.
+5. Each bullet should be a complete, self-contained fact or concept.
+6. Prioritize definitions, formulas, key concepts, important dates/names, and conclusions.
+7. Maintain the original reading order.
+8. If no clear sections exist, create logical groupings.
+9. Use simple, clear language suitable for revision.
 
 Return ONLY valid JSON — no markdown fences, no explanation:
 {
@@ -65,7 +77,37 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   "wordCount": 0
 }`,
 
-  resume: `You are an expert ATS (Applicant Tracking System) analyst for PdfCrux. You compare resumes against job descriptions and provide detailed scoring.
+  ocr: `You are an expert document analyzer for PdfCrux. Analyze the provided PDF document and extract ALL text content with precise layout structure.
+
+CRITICAL RULES:
+1. Extract EVERY word from the PDF — nothing should be missed.
+2. Identify document structure: headings (by font size), paragraphs, tables, lists.
+3. For tables: extract column headers and ALL row data as 2D arrays.
+4. Detect bold text.
+5. Maintain reading order: top-to-bottom, left-to-right.
+6. Output language MUST match the document's language.
+7. Do NOT describe images/photos — only extract text content.
+8. For numbered lists (1., 2., 3. etc), use "numbered_list" type.
+9. Return ALL pages. Do not skip any page.
+
+Return ONLY valid JSON — no markdown fences, no explanation:
+{
+  "pages": [
+    {
+      "page": 1,
+      "elements": [
+        {"type": "heading1", "text": "Document Title"},
+        {"type": "paragraph", "text": "Introduction text.", "bold": false},
+        {"type": "heading2", "text": "Section Title"},
+        {"type": "bullet_list", "items": ["Point one", "Point two"]},
+        {"type": "table", "headers": ["Column A", "Column B"], "rows": [["val1", "val2"]]},
+        {"type": "paragraph", "text": "More content here..."}
+      ]
+    }
+  ]
+}`,
+
+  resume: `You are an expert ATS (Applicant Tracking System) analyst for PdfCrux. You analyze resume PDFs (and optionally a job description) and provide detailed scoring.
 
 SCORING BREAKDOWN (Total: 0-100):
 - Section Score (0-40): Presence of key resume sections (Summary, Skills, Experience, Education, Projects, Certifications, etc.)
@@ -74,12 +116,13 @@ SCORING BREAKDOWN (Total: 0-100):
 - Length Score (0-10): Appropriate word count (ideally 400-800 words for 1 page, up to 1200 for 2 pages)
 
 RULES:
-1. Thoroughly analyze BOTH the resume text AND the job description.
-2. Score each category independently.
-3. List specific keywords found and missing.
-4. Provide 3-5 strengths, 3-5 weaknesses, and 5-8 actionable suggestions.
-5. Grade: A+ (90+), A (80-89), B (70-79), C (60-69), D (50-59), F (<50)
-6. Be honest but constructive — the goal is to help the candidate improve.
+1. Thoroughly analyze the entire resume PDF.
+2. If a job description is provided, compare the resume against it.
+3. Score each category independently.
+4. List specific keywords found and missing.
+5. Provide 3-5 strengths, 3-5 weaknesses, and 5-8 actionable suggestions.
+6. Grade: A+ (90+), A (80-89), B (70-79), C (60-69), D (50-59), F (<50)
+7. Be honest but constructive — the goal is to help the candidate improve.
 
 Return ONLY valid JSON — no markdown fences, no explanation:
 {
@@ -119,7 +162,18 @@ Return ONLY valid JSON — no markdown fences, no explanation:
 
 export type GeminiToolType = keyof typeof SYSTEM_PROMPTS;
 
-export interface GeminiRequestOptions {
+export interface GeminiPdfOptions {
+  /** The tool type determines which system prompt to use */
+  tool: GeminiToolType;
+  /** PDF file buffer (ArrayBuffer) */
+  pdfBuffer: ArrayBuffer;
+  /** Original file name */
+  fileName?: string;
+  /** Optional: additional text context (e.g., job description for resume checker) */
+  extraContext?: string;
+}
+
+export interface GeminiTextOptions {
   /** The tool type determines which system prompt to use */
   tool: GeminiToolType;
   /** The text content to analyze */
@@ -135,22 +189,143 @@ export interface GeminiResponse<T = unknown> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Core: Call Gemini API
+// Core: Send PDF directly to Gemini Vision via file_url + base64 inlineData
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Send a PDF file directly to Gemini via z-ai-web-dev-sdk.
+ *
+ * Uses `file_url` type with `data:application/pdf;base64,...` URI —
+ * Gemini natively reads PDF files. NO image conversion needed.
+ */
+export async function callGeminiWithPdf<T = unknown>(
+  options: GeminiPdfOptions
+): Promise<GeminiResponse<T>> {
+  try {
+    // Validate PDF size
+    if (options.pdfBuffer.byteLength > MAX_PDF_SIZE) {
+      const sizeMB = (options.pdfBuffer.byteLength / 1024 / 1024).toFixed(1);
+      return {
+        success: false,
+        error: `PDF is too large (${sizeMB} MB). Maximum 20 MB supported.`,
+      };
+    }
+
+    const zai = await ZAI.create();
+    const systemPrompt = SYSTEM_PROMPTS[options.tool];
+
+    // Convert PDF buffer to base64 data URI
+    const base64 = Buffer.from(options.pdfBuffer).toString("base64");
+    const pdfDataUri = `data:application/pdf;base64,${base64}`;
+
+    // Build user message with optional extra context
+    let userText: string;
+    if (options.tool === "resume" && options.extraContext) {
+      userText = `Analyze the resume PDF below. Also consider this JOB DESCRIPTION for keyword matching:\n\n${options.extraContext}`;
+    } else if (options.tool === "ocr" && options.extraContext) {
+      userText = `Analyze the PDF document below. The document language is: ${options.extraContext}. Extract ALL text and structure from every page.`;
+    } else {
+      userText = "Analyze the PDF document below and follow the instructions in your system prompt.";
+    }
+
+    // Build multimodal content: text prompt + PDF file
+    const content = [
+      { type: "text" as const, text: userText },
+      {
+        type: "file_url" as const,
+        file_url: { url: pdfDataUri },
+      },
+    ];
+
+    // Call Gemini Vision with timeout
+    const completion = await Promise.race([
+      zai.chat.completions.createVision({
+        model: GEMINI_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content },
+        ],
+        stream: false,
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS)
+      ),
+    ]);
+
+    const rawContent =
+      completion?.choices?.[0]?.message?.content ??
+      completion?.content ??
+      "";
+
+    if (!rawContent || typeof rawContent !== "string") {
+      console.error(
+        `[Gemini:${options.tool}] Unexpected response:`,
+        JSON.stringify(completion)?.substring(0, 300)
+      );
+      return {
+        success: false,
+        error: "AI returned an unexpected response format.",
+      };
+    }
+
+    // Parse JSON from response
+    const data = extractJson<T>(rawContent);
+    return { success: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+
+    if (msg === "TIMEOUT") {
+      return {
+        success: false,
+        error:
+          "AI processing timed out. The document may be too large. Try a smaller PDF.",
+      };
+    }
+
+    if (
+      msg.toLowerCase().includes("api key") ||
+      msg.toLowerCase().includes("not configured") ||
+      msg.toLowerCase().includes("unauthorized")
+    ) {
+      return {
+        success: false,
+        error: "AI service not configured. Please set the GEMINI_API_KEY.",
+      };
+    }
+
+    if (
+      msg.toLowerCase().includes("rate limit") ||
+      msg.toLowerCase().includes("quota")
+    ) {
+      return {
+        success: false,
+        error: "AI rate limit reached. Please wait a moment and try again.",
+      };
+    }
+
+    console.error(`[Gemini:${options.tool}] PDF API call failed:`, msg);
+    return {
+      success: false,
+      error: "AI service request failed. Please try again.",
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core: Call Gemini Text API (text-only, no files)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Send a text analysis request to Gemini via z-ai-web-dev-sdk.
- * Uses the specified tool's system prompt.
+ * Used as fallback when PDF buffer is not available.
  */
 export async function callGemini<T = unknown>(
-  options: GeminiRequestOptions
+  options: GeminiTextOptions
 ): Promise<GeminiResponse<T>> {
   try {
     const zai = await ZAI.create();
-
     const systemPrompt = SYSTEM_PROMPTS[options.tool];
 
-    // Build user message
     let userMessage = "";
     if (options.tool === "resume" && options.extraContext) {
       userMessage = `RESUME TEXT:\n${options.text}\n\n---\n\nJOB DESCRIPTION:\n${options.extraContext}`;
@@ -158,7 +333,7 @@ export async function callGemini<T = unknown>(
       userMessage = options.text;
     }
 
-    // Truncate if too long (Gemini Flash handles ~1M tokens, but let's be safe)
+    // Truncate if too long
     const MAX_CHARS = 100_000;
     const truncatedMessage =
       userMessage.length > MAX_CHARS
@@ -176,7 +351,7 @@ export async function callGemini<T = unknown>(
         stream: false,
       }),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("TIMEOUT")), TEXT_TIMEOUT_MS)
       ),
     ]);
 
@@ -192,7 +367,6 @@ export async function callGemini<T = unknown>(
       };
     }
 
-    // Parse JSON from response
     const data = extractJson<T>(rawContent);
     return { success: true, data };
   } catch (err) {
@@ -208,7 +382,8 @@ export async function callGemini<T = unknown>(
 
     if (
       msg.toLowerCase().includes("api key") ||
-      msg.toLowerCase().includes("not configured")
+      msg.toLowerCase().includes("not configured") ||
+      msg.toLowerCase().includes("unauthorized")
     ) {
       return {
         success: false,
@@ -216,7 +391,7 @@ export async function callGemini<T = unknown>(
       };
     }
 
-    console.error(`[Gemini:${options.tool}] API call failed:`, msg);
+    console.error(`[Gemini:${options.tool}] Text API call failed:`, msg);
     return {
       success: false,
       error: "AI service request failed. Please try again.",
@@ -255,37 +430,4 @@ export function extractJson<T = unknown>(raw: string): T {
 
     throw new Error("Could not find valid JSON in response");
   }
-}
-
-/**
- * Extract text from a PDF File using pdfjs-dist (server-side).
- */
-export async function extractTextFromPDF(file: File | Blob): Promise<string> {
-  const pdfjsLib = await import("pdfjs-dist");
-
-  // Server-side: use the worker from node_modules
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "pdfjs-dist/build/pdf.worker.min.mjs";
-
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({
-    data: arrayBuffer,
-    useWorkerFetch: false,
-  }).promise;
-
-  const pageTexts: string[] = [];
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-
-    const pageText = textContent.items
-      .filter((item): item is { str: string } => "str" in item)
-      .map((item) => item.str)
-      .join(" ");
-
-    pageTexts.push(pageText);
-  }
-
-  return pageTexts.join("\n\n");
 }
