@@ -45,7 +45,7 @@ const MAX_TOTAL_SIZE = 20 * 1024 * 1024;
 const GEMINI_TIMEOUT_MS = 60_000;
 
 /** Model to use for Gemini Vision */
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-1.5-flash-8b";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
