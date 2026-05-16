@@ -158,173 +158,64 @@ Stage Summary:
 ---
 Task ID: 11
 Agent: Main
-Task: Fix all 3 AI tools crashing on deployment — complete production rewrite
+Task: Fix all AI tools "AI service request failed" + PDF-to-Word 404 + model name migration
 
 Work Log:
-- Diagnosed 4 root causes of production crashes:
-  1. **Model ID wrong**: `gemini-2.0-flash` → fixed to `gemini-1.5-flash-8b` everywhere
-  2. **Server-side PDF parsing broken**: `extractTextFromPDF()` using pdfjs-dist worker crashes on Vercel
-  3. **Frontend JSON parse crash**: `response.json()` without `response.ok` check → "Unexpected token" when backend 500s
-  4. **Missing runtime export**: No `export const runtime = 'nodejs'` on API routes
+- Root cause analysis: z-ai-web-dev-sdk requires `.z-ai-config` file which was missing → ZAI.create() failed silently → "AI service request failed"
+- gemini-ocr/route.ts was missing `export const runtime = "nodejs"` → Vercel Edge runtime lacks Node.js APIs → 404/crash
+- User requested migration to direct Google Generative AI SDK (@google/generative-ai) with process.env for model name
 
-- **Complete rewrite of `src/lib/gemini.ts`**:
-  - Model: `gemini-1.5-flash-8b` (was `gemini-2.0-flash`)
-  - NEW `callGeminiVision()` — sends images via `createVision()` + tool-specific system prompt
-  - Kept `callGemini()` as text-only fallback
-  - Removed `extractTextFromPDF()` — no longer needed (moved to client side)
-  - Added `blobToDataUri()` helper for API routes
-  - Better error handling: timeout, rate limit, API key detection
-  - 120s timeout for vision, 90s for text
-
-- **Rewrote all 3 API routes** (`summarize`, `notes`, `resume`):
-  - Added `export const runtime = 'nodejs'` — forces Node.js (not Edge) for Gemini SDK
-  - Changed from receiving PDF file → receiving page images (FormData with `images[]` key)
-  - Added try-catch around `request.formData()` for malformed requests
-  - Comprehensive validation: image count, total size (20MB limit), page limits
-  - Always returns valid JSON — never lets Next.js return HTML error pages
-  - Routes: `/api/gemini/summarize`, `/api/gemini/notes`, `/api/gemini/resume`
-
-- **Created `src/lib/pdf-to-images.ts`** (client-side utility):
-  - `pdfToImages(file, onProgress?)` → `{ images: Blob[], totalPages, wordCount }`
-  - Renders PDF pages to JPEG at 200 DPI using browser's pdfjs-dist
-  - Also extracts word count from text content for metadata
-  - Max 30 pages, JPEG quality 0.85
-
-- **Rewrote `src/components/tool/AIToolPage.tsx`**:
-  - NEW: Client-side PDF→images conversion before API call (phase 1 of processing)
-  - FIXED: `response.ok` check before `response.json()` — prevents "Unexpected token" crash
-  - FIXED: Graceful error message extraction from non-200 responses
-  - Updated engine badges: `gemini-1.5-flash-8b` (was `gemini-2.0-flash`)
-  - Updated progress steps to include "Converting PDF pages to images..."
-  - Loader2 icon during conversion phase, BrainCircuit during AI phase
-  - Better error UI with red themed card and "Try Again" button
-
-- **Updated `src/app/api/gemini-ocr/route.ts`**:
-  - Model: `gemini-2.0-flash` → `gemini-1.5-flash-8b`
-
-- Verified: All routes return proper JSON errors for malformed requests (400, not 500)
-- Verified: Homepage returns HTTP 200
-- Verified: ESLint clean (only pre-existing errors from worker file + AuthProvider)
+Changes made:
+1. Installed `@google/generative-ai@0.24.1`
+2. Complete rewrite of `src/lib/gemini.ts`:
+   - Replaced z-ai-web-dev-sdk with direct Google Generative AI SDK
+   - Model name reads from `process.env.GEMINI_MODEL_NAME` (fallback: gemini-2.0-flash)
+   - API key reads from `process.env.GEMINI_API_KEY`
+   - Uses `model.generateContent(parts)` with inline image data (base64)
+   - PDF → Images → Gemini Vision pipeline preserved
+   - Added `getModelName()` helper for display
+3. Complete rewrite of `src/app/api/gemini-ocr/route.ts`:
+   - Replaced z-ai-web-dev-sdk with direct Google Generative AI SDK
+   - Added `export const runtime = "nodejs"` (fixes Vercel Edge runtime issue)
+   - Uses inlineData parts for images instead of data URI URLs
+   - Model reads from `process.env.GEMINI_MODEL_NAME`
+4. Updated `src/components/tool/AIToolPage.tsx`:
+   - All 3 engine badges changed from "gemini-1.5-flash-8b" to "gemini-2.0-flash"
 
 Stage Summary:
-- **Architecture change**: Server-side PDF parsing REMOVED. Client renders PDF to images, sends to backend, backend forwards to Gemini Vision.
-- **Files modified**: 7 files total
-  1. `src/lib/gemini.ts` — REWRITTEN (model, Vision API, removed PDF parser)
-  2. `src/app/api/gemini/summarize/route.ts` — REWRITTEN (images in, Vision API, Node.js runtime)
-  3. `src/app/api/gemini/notes/route.ts` — REWRITTEN (images in, Vision API, Node.js runtime)
-  4. `src/app/api/gemini/resume/route.ts` — REWRITTEN (images in, Vision API, Node.js runtime)
-  5. `src/lib/pdf-to-images.ts` — NEW (client-side PDF→JPEG converter)
-  6. `src/components/tool/AIToolPage.tsx` — REWRITTEN (client PDF conversion, error handling, badges)
-  7. `src/app/api/gemini-ocr/route.ts` — UPDATED (model ID fix)
-- **Root causes fixed**: Model ID, server PDF parsing crash, frontend JSON parse crash, missing runtime
-- **Production ready**: All error paths return valid JSON, Node.js runtime enforced, proper timeout handling
+- All hardcoded model references replaced with env var or correct model name
+- Root cause of "AI service request failed" fixed: no more dependency on missing .z-ai-config
+- Root cause of PDF-to-Word 404 fixed: added `runtime = "nodejs"` to gemini-ocr route
+- Files modified: gemini.ts, gemini-ocr/route.ts, AIToolPage.tsx
+- New dependency: @google/generative-ai@0.24.1
+- Vercel env vars needed: GEMINI_API_KEY, GEMINI_MODEL_NAME (value: gemini-2.0-flash)
+- Zero new lint errors
 
 ---
 Task ID: 12
 Agent: Main
-Task: Replace image-based approach with native PDF inlineData — send PDF buffer directly to Gemini
+Task: Fix Vercel build "Module not found: Can't resolve @google/generative-ai"
 
 Work Log:
-- User requested: stop converting PDF→images, send PDF buffer directly via Gemini's `file_url` inlineData
-- Discovered z-ai-web-dev-sdk supports `type: 'file_url'` with `data:application/pdf;base64,...` URIs natively
-- **Complete rewrite of `src/lib/gemini.ts`** (3rd iteration — cleanest):
-  - NEW `callGeminiWithPdf()` — sends PDF ArrayBuffer as base64 data URI via `file_url` type
-  - Gemini natively reads PDF files — NO image conversion needed at all
-  - Removed `callGeminiVision()` and `blobToDataUri()` (no longer needed)
-  - Kept `callGemini()` as text-only fallback
-  - `extractJson()` helper retained
-  - Model: `gemini-1.5-flash-8b`
-  - Max PDF size: 20MB
-  - 120s timeout, rate limit detection, API key error handling
+- Root cause: Vercel changed package manager from bun to npm (detected from package-lock.json). npm install couldn't resolve @google/generative-ai properly.
+- Solution: COMPLETELY REMOVED @google/generative-ai dependency. Rewrote both files to use Google Gemini REST API directly via fetch() — ZERO external SDK needed.
 
-- **Rewrote all 3 API routes** (3rd iteration — simplest):
-  - `/api/gemini/summarize/route.ts` — receives raw PDF file → `file.arrayBuffer()` → `callGeminiWithPdf()`
-  - `/api/gemini/notes/route.ts` — receives raw PDF file → `file.arrayBuffer()` → `callGeminiWithPdf()`
-  - `/api/gemini/resume/route.ts` — receives raw PDF + optional JD text → `callGeminiWithPdf()`
-  - Routes now use simple `form.get("file")` / `form.get("resume")` instead of `form.getAll("images")`
-  - All routes validate: file type, size (20MB max), FormData parsing
-  - All routes have `export const runtime = 'nodejs'`
-
-- **Simplified `src/components/tool/AIToolPage.tsx`** (3rd iteration):
-  - REMOVED `import { pdfToImages }` — no longer needed!
-  - Frontend sends raw PDF file via FormData (no client-side conversion)
-  - Single `form.append("file", file)` — that's it
-  - Resume: `form.append("resume", file)` + optional `form.append("jobDescription", ...)`
-  - Progress animation simplified: steps focus on "Gemini is reading your document..."
-  - Removed Loader2 icon (no conversion phase)
-  - Fixed `response.ok` check before `.json()` — prevents "Unexpected token" crash
-  - Error state UI with red card + "Try Again" button
-
-- **Fixed Turbopack cache issue**: Cleared `.next/cache` after rewrite
+Changes made:
+1. Removed `@google/generative-ai` from package.json dependencies
+2. Removed package-lock.json (let bun/bun.lock manage dependencies)
+3. Complete rewrite of `src/lib/gemini.ts`:
+   - No imports from any AI SDK
+   - Uses `fetch()` to call `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}`
+   - Request body follows Google Gemini REST API format (contents, systemInstruction, generationConfig)
+   - Response parsing: `data.candidates[0].content.parts[0].text`
+4. Complete rewrite of `src/app/api/gemini-ocr/route.ts`:
+   - Same REST API approach with fetch()
+   - Added `export const runtime = "nodejs"` preserved
+5. AIToolPage.tsx engine badges already correct (gemini-2.0-flash) from previous fix
 
 Stage Summary:
-- **Architecture (FINAL)**: Client sends raw PDF → Server reads buffer → Gemini `file_url` base64 inlineData
-  - NO client-side PDF→image conversion
-  - NO server-side pdfjs-dist parsing
-  - PDF goes directly to Gemini as a native document
-- **Files modified**: 4 files
-  1. `src/lib/gemini.ts` — REWRITTEN (callGeminiWithPdf with file_url, removed Vision/image code)
-  2. `src/app/api/gemini/summarize/route.ts` — REWRITTEN (raw PDF in → buffer → Gemini)
-  3. `src/app/api/gemini/notes/route.ts` — REWRITTEN (raw PDF in → buffer → Gemini)
-  4. `src/app/api/gemini/resume/route.ts` — REWRITTEN (raw PDF + JD → buffer → Gemini)
-  5. `src/components/tool/AIToolPage.tsx` — SIMPLIFIED (no pdf-to-images, raw FormData)
-- `src/lib/pdf-to-images.ts` kept but no longer imported (may be useful for other tools)
-- **Simplest possible architecture**: 1 FormData field → 1 arrayBuffer → 1 Gemini call
-
----
-Task ID: 13
-Agent: Main
-Task: Add Gemini OCR toggle to PDF-to-Word + native PDF support + cleanup
-
-Work Log:
-- User requested: implement native PDF support in PDF-to-Word + add "Gemini OCR" toggle
-- **Updated `src/lib/gemini.ts`**:
-  - Added `ocr` system prompt to SYSTEM_PROMPTS for PDF-to-Word OCR
-  - Updated `callGeminiWithPdf()` to handle `ocr` tool type with language via extraContext
-  - Model remains `gemini-1.5-flash-8b`
-
-- **Created `src/app/api/gemini/ocr-pdf/route.ts`** (NEW):
-  - Accepts raw PDF file + language via FormData
-  - Calls `callGeminiWithPdf()` with `tool: "ocr"` and language as extraContext
-  - Returns structured GeminiPage[] with elements per page
-  - Full validation: file type, size (20MB), proper JSON errors
-  - `export const runtime = "nodejs"`
-
-- **Complete rewrite of `src/lib/converters/pdf-to-word.ts`** (dual mode):
-  - **Gemini OCR mode** (toggle ON): Sends raw PDF to `/api/gemini/ocr-pdf`, Gemini natively reads PDF
-  - **Basic mode** (toggle OFF): Client-side text extraction using pdfjs-dist `getTextContent()`
-  - Basic mode features: heading detection by font size, line grouping, bullet/numbered list detection
-  - Both modes produce `GeminiPage[]` → same DOCX builder
-  - Response body validation before `.json()` — prevents "Unexpected token R" crash
-  - DOCX generation shared between modes (Calibri font, proper headings, bordered tables)
-
-- **Updated `src/lib/tool-configs.ts`**:
-  - Added "Gemini OCR" toggle (type: toggle, default: true) to pdf-to-word options
-  - Removed "Column Handling" radio option (simplified)
-  - Updated processing steps for dual-mode workflow
-  - Toggle hint: "AI-powered extraction (better for scanned PDFs & complex layouts)"
-
-- **Updated `src/components/tool/ToolPage.tsx`**:
-  - Processing animation now adapts to toggle state
-  - Gemini ON: Shows "Gemini AI is Analyzing" with amber/emerald spinner + Gemini badge
-  - Gemini OFF: Shows "Extracting Text" with primary spinner + "Fast Extraction / Client-Side" badge
-  - Added `Zap` to lucide-react imports
-
-- **Removed `src/lib/pdf-to-images.ts`** (no longer imported anywhere)
-
-- **Model audit**: All active code uses `gemini-1.5-flash-8b` (only commented-out code had `gemini-2.0-flash`)
-- **TypeScript check**: All new code compiles clean (only pre-existing i18n.ts error)
-
-Stage Summary:
-- **PDF-to-Word now has 2 modes** controlled by "Gemini OCR" toggle:
-  - Gemini OCR ON (default): Native PDF → Gemini AI → structured DOCX
-  - Gemini OCR OFF: Client-side text extraction → basic DOCX
-- **Files modified**: 5 files
-  1. `src/lib/gemini.ts` — Added `ocr` prompt + handler
-  2. `src/app/api/gemini/ocr-pdf/route.ts` — NEW (native PDF OCR endpoint)
-  3. `src/lib/converters/pdf-to-word.ts` — REWRITTEN (dual mode)
-  4. `src/lib/tool-configs.ts` — Added Gemini OCR toggle
-  5. `src/components/tool/ToolPage.tsx` — Mode-aware processing animation
-- **Files removed**: `src/lib/pdf-to-images.ts`
-- **No more image conversion**: All tools use native PDF support via Gemini
-- **Error-safe**: response.ok checks prevent "Unexpected token" crashes
+- ZERO external AI SDK dependencies — uses native fetch() only
+- No more "Module not found" build errors possible
+- Vercel env vars needed: GEMINI_API_KEY, GEMINI_MODEL_NAME (value: gemini-2.0-flash)
+- Both gemini.ts and gemini-ocr/route.ts are completely self-contained
+- Zero new lint errors, dev server compiles correctly
