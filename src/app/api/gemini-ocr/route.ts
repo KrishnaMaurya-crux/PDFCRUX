@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+// Force Node.js runtime (not Edge) — PDF rendering requires Node.js APIs
+export const runtime = "nodejs";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -44,8 +47,8 @@ const MAX_TOTAL_SIZE = 20 * 1024 * 1024;
 /** Timeout for Gemini API call (60 seconds) */
 const GEMINI_TIMEOUT_MS = 60_000;
 
-/** Model to use for Gemini Vision */
-const GEMINI_MODEL = "gemini-1.5-flash-8b";
+/** Model to use — from environment variable with fallback */
+const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-2.0-flash";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -53,14 +56,13 @@ const GEMINI_MODEL = "gemini-1.5-flash-8b";
 
 /**
  * Convert a File / Blob into a base64 data-URI string suitable for the
- * VisionMessage image_url payload.
+ * Gemini inline data payload.
  */
-async function blobToDataUri(blob: Blob): Promise<string> {
+async function blobToBase64Parts(blob: Blob): Promise<{ mimeType: string; data: string }> {
   const buffer = await blob.arrayBuffer();
   const base64 = Buffer.from(buffer).toString("base64");
-  // Determine MIME from the blob; fall back to image/jpeg
   const mime = blob.type || "image/jpeg";
-  return `data:${mime};base64,${base64}`;
+  return { mimeType: mime, data: base64 };
 }
 
 /**
@@ -134,8 +136,20 @@ function extractJson(raw: string): GeminiPage[] {
 
 export async function POST(request: NextRequest) {
   try {
-    // ── Step 1: Initialize the AI SDK ──
-    const zai = await ZAI.create();
+    // ── Step 1: Validate API key ──
+    const apiKey = process.env.GEMINI_API_KEY || "";
+    if (!apiKey) {
+      return NextResponse.json<GeminiOcrResponse>(
+        {
+          success: false,
+          pages: [],
+          batchIndex: 0,
+          totalBatches: 1,
+          error: "AI service not configured. Please set GEMINI_API_KEY.",
+        },
+        { status: 500 }
+      );
+    }
 
     // ── Step 2: Parse incoming FormData ──
     const form = await request.formData();
@@ -191,10 +205,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Step 4: Convert images to base64 data URIs ──
-    let dataUris: string[];
+    // ── Step 4: Convert images to base64 parts ──
+    let imageParts: Array<{ mimeType: string; data: string }>;
     try {
-      dataUris = await Promise.all(blobs.map((blob) => blobToDataUri(blob)));
+      imageParts = await Promise.all(blobs.map((blob) => blobToBase64Parts(blob)));
     } catch (conversionErr) {
       console.error("[GeminiOCR] Image conversion failed:", conversionErr);
       return NextResponse.json<GeminiOcrResponse>(
@@ -209,45 +223,41 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Step 5: Build VisionMessage with prompt + images ──
+    // ── Step 5: Initialize Google Generative AI ──
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({
+      model: GEMINI_MODEL,
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 16384,
+      },
+    });
+
+    // ── Step 6: Build multimodal parts: prompt text + images ──
     const prompt = buildPrompt(language);
+    const parts: Array<
+      | { text: string }
+      | { inlineData: { mimeType: string; data: string } }
+    > = [{ text: prompt }];
 
-    // Build multimodal content: text prompt first, then each image
-    const content = [
-      { type: "text" as const, text: prompt },
-      ...dataUris.map((uri) => ({
-        type: "image_url" as const,
-        image_url: { url: uri },
-      })),
-    ];
+    for (const imgPart of imageParts) {
+      parts.push({ inlineData: imgPart });
+    }
 
-    // ── Step 6: Call Gemini Vision API with timeout ──
+    // ── Step 7: Call Gemini with timeout ──
     let rawResponse: string;
     try {
-      const completion = await Promise.race([
-        zai.chat.completions.createVision({
-          model: GEMINI_MODEL,
-          messages: [{ role: "user", content }],
-          stream: false,
-        }),
-        // Timeout guard
+      const result = await Promise.race([
+        model.generateContent(parts),
         new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error("TIMEOUT")),
-            GEMINI_TIMEOUT_MS
-          )
+          setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS)
         ),
       ]);
 
-      // Extract text from the completion response
-      // SDK returns something like { choices: [{ message: { content: "..." } }] }
-      rawResponse =
-        completion?.choices?.[0]?.message?.content ??
-        completion?.content ??
-        "";
+      rawResponse = result.response.text();
 
       if (!rawResponse || typeof rawResponse !== "string") {
-        console.error("[GeminiOCR] Unexpected response shape:", JSON.stringify(completion).substring(0, 500));
+        console.error("[GeminiOCR] Unexpected response shape:", rawResponse);
         return NextResponse.json<GeminiOcrResponse>(
           {
             success: false,
@@ -276,6 +286,40 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      if (
+        msg.toLowerCase().includes("api key") ||
+        msg.toLowerCase().includes("invalid") ||
+        msg.toLowerCase().includes("unauthorized")
+      ) {
+        return NextResponse.json<GeminiOcrResponse>(
+          {
+            success: false,
+            pages: [],
+            batchIndex,
+            totalBatches,
+            error: "AI service not configured. Please set a valid GEMINI_API_KEY.",
+          },
+          { status: 500 }
+        );
+      }
+
+      if (
+        msg.toLowerCase().includes("rate limit") ||
+        msg.toLowerCase().includes("quota") ||
+        msg.toLowerCase().includes("resource_exhausted")
+      ) {
+        return NextResponse.json<GeminiOcrResponse>(
+          {
+            success: false,
+            pages: [],
+            batchIndex,
+            totalBatches,
+            error: "AI rate limit reached. Please wait a moment and try again.",
+          },
+          { status: 429 }
+        );
+      }
+
       return NextResponse.json<GeminiOcrResponse>(
         {
           success: false,
@@ -288,7 +332,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Step 7: Parse the JSON response ──
+    // ── Step 8: Parse the JSON response ──
     let pages: GeminiPage[];
     try {
       pages = extractJson(rawResponse);
@@ -307,7 +351,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Step 8: Return success ──
+    // ── Step 9: Return success ──
     return NextResponse.json<GeminiOcrResponse>({
       success: true,
       pages,
@@ -318,22 +362,6 @@ export async function POST(request: NextRequest) {
     // Catch-all: SDK init failure, unexpected errors, etc.
     const msg = initErr instanceof Error ? initErr.message : String(initErr);
     console.error("[GeminiOCR] Unhandled error:", msg);
-
-    if (
-      msg.toLowerCase().includes("api key") ||
-      msg.toLowerCase().includes("not configured")
-    ) {
-      return NextResponse.json<GeminiOcrResponse>(
-        {
-          success: false,
-          pages: [],
-          batchIndex: 0,
-          totalBatches: 1,
-          error: "AI service not configured. Please set API key.",
-        },
-        { status: 500 }
-      );
-    }
 
     return NextResponse.json<GeminiOcrResponse>(
       {
