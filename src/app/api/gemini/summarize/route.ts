@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callGemini, extractTextFromPDF } from "@/lib/gemini";
+import { callGeminiWithPdf } from "@/lib/gemini";
+
+// Force Node.js runtime (not Edge) — Gemini SDK requires Node.js APIs
+export const runtime = "nodejs";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -15,18 +18,34 @@ interface SummaryResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_PDF_SIZE = 20 * 1024 * 1024; // 20MB
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Route Handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   try {
     // ── Parse FormData ──
-    const form = await request.formData();
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      return NextResponse.json<SummaryResponse>(
+        { success: false, error: "Invalid request format. Please upload a valid PDF." },
+        { status: 400 }
+      );
+    }
+
     const file = form.get("file") as File | null;
 
+    // ── Validate inputs ──
     if (!file) {
       return NextResponse.json<SummaryResponse>(
-        { success: false, error: "No file provided." },
+        { success: false, error: "No PDF file provided." },
         { status: 400 }
       );
     }
@@ -39,34 +58,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Extract text from PDF ──
-    let text: string;
-    try {
-      text = await extractTextFromPDF(file);
-    } catch (extractErr) {
-      console.error("[Gemini:Summarize] Text extraction failed:", extractErr);
+    // Validate file size
+    if (file.size > MAX_PDF_SIZE) {
+      const sizeMB = (file.size / 1024 / 1024).toFixed(1);
       return NextResponse.json<SummaryResponse>(
-        { success: false, error: "Failed to read the PDF. Please try a text-based PDF." },
+        { success: false, error: `PDF is too large (${sizeMB} MB). Maximum 20 MB supported.` },
         { status: 400 }
       );
     }
 
-    if (!text || text.trim().length < 50) {
-      return NextResponse.json<SummaryResponse>(
-        { success: false, error: "Could not extract enough text from this PDF. Please try a text-based PDF." },
-        { status: 400 }
-      );
-    }
+    // ── Read PDF buffer ──
+    const pdfBuffer = await file.arrayBuffer();
 
-    // ── Call Gemini ──
-    const result = await callGemini<{
+    // ── Call Gemini with PDF buffer directly ──
+    const result = await callGeminiWithPdf<{
       title: string;
       bulletPoints: string[];
       wordCount: number;
       readingTime: string;
     }>({
       tool: "summarize",
-      text,
+      pdfBuffer,
+      fileName: file.name,
     });
 
     if (!result.success || !result.data) {
@@ -86,12 +99,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const wordCount = data.wordCount || 0;
+    const readingTime = data.readingTime || estimateReadingTime(wordCount);
+
     return NextResponse.json<SummaryResponse>({
       success: true,
       title: data.title || "Untitled Document",
       bulletPoints: data.bulletPoints,
-      wordCount: data.wordCount || countWords(text),
-      readingTime: data.readingTime || estimateReadingTime(countWords(text)),
+      wordCount,
+      readingTime,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -106,10 +122,6 @@ export async function POST(request: NextRequest) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-function countWords(text: string): number {
-  return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
-}
 
 function estimateReadingTime(wordCount: number): string {
   const minutes = Math.max(1, Math.ceil(wordCount / 200));
