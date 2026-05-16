@@ -8,7 +8,7 @@
  * PDF buffers are sent directly — NO image conversion needed.
  *
  * Two calling modes:
- *  1. callGeminiWithPdf() — Sends PDF file buffer directly to Gemini Vision via inlineData
+ *  1. callGeminiWithPdf() — Sends PDF file buffer directly to Gemini via file_url
  *  2. callGemini()        — Text-only prompt → Gemini (fallback / other uses)
  *
  * Each tool has its own SYSTEM_PROMPT defined here.
@@ -24,7 +24,7 @@ const GEMINI_MODEL = "gemini-1.5-flash-8b";
 const GEMINI_TIMEOUT_MS = 120_000; // 120 seconds for PDF analysis
 const TEXT_TIMEOUT_MS = 90_000; // 90 seconds for text-only analysis
 
-// Maximum PDF size: 20 MB (Vercel limit is 4.5 MB for body, but we buffer)
+// Maximum PDF size: 20 MB
 const MAX_PDF_SIZE = 20 * 1024 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -189,7 +189,7 @@ export interface GeminiResponse<T = unknown> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Core: Send PDF directly to Gemini Vision via file_url + base64 inlineData
+// Core: Send PDF directly to Gemini via file_url + base64 data URI
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
