@@ -2,40 +2,45 @@
  * Shared Gemini AI Engine for PdfCrux
  *
  * Central utility for all Gemini API interactions across PdfCrux AI tools.
- * Uses z-ai-web-dev-sdk for API calls with gemini-1.5-flash-8b model.
+ * Uses the official @google/generative-ai SDK directly.
  *
- * Uses Gemini's native PDF support via `file_url` type with base64 data URIs.
- * PDF buffers are sent directly — NO image conversion needed.
+ * Configuration (via environment variables):
+ *   GEMINI_API_KEY    — Your Google AI Studio API key
+ *   GEMINI_MODEL_NAME — Model to use (default: gemini-2.0-flash)
  *
- * Two calling modes:
- *  1. callGeminiWithPdf() — Sends PDF file buffer directly to Gemini via file_url
- *  2. callGemini()        — Text-only prompt → Gemini (fallback / other uses)
+ * Flow:
+ *   callGeminiWithPdf() → Converts PDF to images server-side → Sends images to Gemini
+ *   callGemini()        → Text-only prompt → Gemini (no files)
  *
  * Each tool has its own SYSTEM_PROMPT defined here.
  */
 
-import ZAI from "z-ai-web-dev-sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants
+// Configuration — reads from environment variables
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-1.5-flash-8b";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL_NAME = process.env.GEMINI_MODEL_NAME || "gemini-2.0-flash";
 const GEMINI_TIMEOUT_MS = 120_000; // 120 seconds for PDF analysis
 const TEXT_TIMEOUT_MS = 90_000; // 90 seconds for text-only analysis
 
 // Maximum PDF size: 20 MB
 const MAX_PDF_SIZE = 20 * 1024 * 1024;
 
+// Max images per request (to avoid token limits)
+const MAX_IMAGES_PER_REQUEST = 5;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // System Prompts — One per tool
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SYSTEM_PROMPTS = {
-  summarize: `You are an expert document summarizer for PdfCrux. Your job is to analyze the provided PDF document and create a Professional Executive Summary.
+  summarize: `You are an expert document summarizer for PdfCrux. Your job is to analyze the provided document images and create a Professional Executive Summary.
 
 RULES:
-1. Read the entire PDF carefully — extract all text content.
+1. Read all pages carefully — extract all text content from the images.
 2. Identify the main topic, key arguments, conclusions, and supporting evidence.
 3. Generate 7-12 bullet points that capture the essence of the document.
 4. Each bullet should be concise (1-2 sentences), informative, and stand alone.
@@ -51,10 +56,10 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   "readingTime": "X min read"
 }`,
 
-  notes: `You are an expert study notes creator for PdfCrux. Your job is to analyze the provided PDF document and convert it into well-structured, exam-ready Study Notes.
+  notes: `You are an expert study notes creator for PdfCrux. Your job is to analyze the provided document images and convert them into well-structured, exam-ready Study Notes.
 
 RULES:
-1. Read the entire PDF carefully — extract all text content.
+1. Read all pages carefully — extract all text content from the images.
 2. Analyze the document structure and identify logical sections/topics.
 3. Create clear, descriptive headings for each section.
 4. Under each heading, extract 3-5 key bullet points.
@@ -77,13 +82,13 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   "wordCount": 0
 }`,
 
-  ocr: `You are an expert document analyzer for PdfCrux. Analyze the provided PDF document and extract ALL text content with precise layout structure.
+  ocr: `You are an expert document analyzer for PdfCrux. Analyze the provided document images and extract ALL text content with precise layout structure.
 
 CRITICAL RULES:
-1. Extract EVERY word from the PDF — nothing should be missed.
+1. Extract EVERY word from the images — nothing should be missed.
 2. Identify document structure: headings (by font size), paragraphs, tables, lists.
 3. For tables: extract column headers and ALL row data as 2D arrays.
-4. Detect bold text.
+4. Detect bold text visually.
 5. Maintain reading order: top-to-bottom, left-to-right.
 6. Output language MUST match the document's language.
 7. Do NOT describe images/photos — only extract text content.
@@ -107,7 +112,7 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   ]
 }`,
 
-  resume: `You are an expert ATS (Applicant Tracking System) analyst for PdfCrux. You analyze resume PDFs (and optionally a job description) and provide detailed scoring.
+  resume: `You are an expert ATS (Applicant Tracking System) analyst for PdfCrux. You analyze resume images (and optionally a job description) and provide detailed scoring.
 
 SCORING BREAKDOWN (Total: 0-100):
 - Section Score (0-40): Presence of key resume sections (Summary, Skills, Experience, Education, Projects, Certifications, etc.)
@@ -116,7 +121,7 @@ SCORING BREAKDOWN (Total: 0-100):
 - Length Score (0-10): Appropriate word count (ideally 400-800 words for 1 page, up to 1200 for 2 pages)
 
 RULES:
-1. Thoroughly analyze the entire resume PDF.
+1. Thoroughly analyze ALL resume page images.
 2. If a job description is provided, compare the resume against it.
 3. Score each category independently.
 4. List specific keywords found and missing.
@@ -163,22 +168,15 @@ Return ONLY valid JSON — no markdown fences, no explanation:
 export type GeminiToolType = keyof typeof SYSTEM_PROMPTS;
 
 export interface GeminiPdfOptions {
-  /** The tool type determines which system prompt to use */
   tool: GeminiToolType;
-  /** PDF file buffer (ArrayBuffer) */
   pdfBuffer: ArrayBuffer;
-  /** Original file name */
   fileName?: string;
-  /** Optional: additional text context (e.g., job description for resume checker) */
   extraContext?: string;
 }
 
 export interface GeminiTextOptions {
-  /** The tool type determines which system prompt to use */
   tool: GeminiToolType;
-  /** The text content to analyze */
   text: string;
-  /** Optional: additional context (e.g., job description for resume checker) */
   extraContext?: string;
 }
 
@@ -189,19 +187,161 @@ export interface GeminiResponse<T = unknown> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Core: Send PDF directly to Gemini via file_url + base64 data URI
+// SDK Initialization
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getGenAI(): GoogleGenerativeAI {
+  if (!GEMINI_API_KEY) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured. Please set the environment variable."
+    );
+  }
+  return new GoogleGenerativeAI(GEMINI_API_KEY);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PDF to Images conversion (server-side using pdfjs-dist)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Send a PDF file directly to Gemini via z-ai-web-dev-sdk.
- *
- * Uses `file_url` type with `data:application/pdf;base64,...` URI —
- * Gemini natively reads PDF files. NO image conversion needed.
+ * Convert a PDF buffer into an array of base64 JPEG data URIs.
+ * Uses pdfjs-dist for rendering on the server.
+ */
+export async function pdfToImageUris(
+  pdfBuffer: ArrayBuffer
+): Promise<string[]> {
+  const pdfjsLib = await import("pdfjs-dist");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+
+  const pdf = await pdfjsLib.getDocument({
+    data: new Uint8Array(pdfBuffer),
+    useWorkerFetch: false,
+  }).promise;
+
+  const uris: string[] = [];
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+
+    // Render at 1.5x scale for good quality
+    const scale = 1.5;
+    const viewport = page.getViewport({ scale });
+
+    // Create a canvas and render
+    const canvas = await page.render({ viewport }).promise;
+
+    // Get JPEG buffer from canvas
+    const jpegDataUri = canvas.toDataURL("image/jpeg", 0.85);
+    uris.push(jpegDataUri);
+
+    // Clean up
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
+  return uris;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core: Send images to Gemini Vision
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Send image data URIs to Gemini Vision API.
+ * If more than MAX_IMAGES_PER_REQUEST images, they are batched.
+ */
+async function callVisionWithImages(
+  systemPrompt: string,
+  userText: string,
+  imageUris: string[],
+  timeoutMs: number
+): Promise<string> {
+  const genAI = getGenAI();
+
+  // Use the model with image generation capabilities
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL_NAME,
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 8192,
+    },
+  });
+
+  // Split into batches if needed
+  const batches: string[][] = [];
+  for (let i = 0; i < imageUris.length; i += MAX_IMAGES_PER_REQUEST) {
+    batches.push(imageUris.slice(i, i + MAX_IMAGES_PER_REQUEST));
+  }
+
+  let fullResponse = "";
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    const isFirstBatch = b === 0;
+
+    // Build the prompt text
+    const promptText = isFirstBatch
+      ? `${systemPrompt}\n\n${userText}`
+      : "Continue extracting content from the next pages. Follow the same format as before.";
+
+    // Build parts: text prompt + images
+    const parts: Array<
+      | { text: string }
+      | { inlineData: { mimeType: string; data: string } }
+    > = [{ text: promptText }];
+
+    for (const uri of batch) {
+      // Extract base64 data from data URI
+      const matches = uri.match(/^data:(image\/\w+);base64,(.+)$/);
+      if (matches) {
+        parts.push({
+          inlineData: {
+            mimeType: matches[1],
+            data: matches[2],
+          },
+        });
+      }
+    }
+
+    const completion = await Promise.race([
+      model.generateContent(parts),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs)
+      ),
+    ]);
+
+    const rawContent = completion.response.text();
+
+    if (!rawContent || typeof rawContent !== "string") {
+      throw new Error("AI returned an unexpected response format.");
+    }
+
+    fullResponse += rawContent;
+  }
+
+  return fullResponse;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API: callGeminiWithPdf
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Send a PDF to Gemini by first converting it to images server-side.
+ * This is the main entry point for all PDF-based AI tools.
  */
 export async function callGeminiWithPdf<T = unknown>(
   options: GeminiPdfOptions
 ): Promise<GeminiResponse<T>> {
   try {
+    // Validate API key early
+    if (!GEMINI_API_KEY) {
+      return {
+        success: false,
+        error: "AI service not configured. Please set the GEMINI_API_KEY.",
+      };
+    }
+
     // Validate PDF size
     if (options.pdfBuffer.byteLength > MAX_PDF_SIZE) {
       const sizeMB = (options.pdfBuffer.byteLength / 1024 / 1024).toFixed(1);
@@ -211,62 +351,35 @@ export async function callGeminiWithPdf<T = unknown>(
       };
     }
 
-    const zai = await ZAI.create();
     const systemPrompt = SYSTEM_PROMPTS[options.tool];
-
-    // Convert PDF buffer to base64 data URI
-    const base64 = Buffer.from(options.pdfBuffer).toString("base64");
-    const pdfDataUri = `data:application/pdf;base64,${base64}`;
 
     // Build user message with optional extra context
     let userText: string;
     if (options.tool === "resume" && options.extraContext) {
-      userText = `Analyze the resume PDF below. Also consider this JOB DESCRIPTION for keyword matching:\n\n${options.extraContext}`;
+      userText = `Analyze the resume pages below. Also consider this JOB DESCRIPTION for keyword matching:\n\n${options.extraContext}`;
     } else if (options.tool === "ocr" && options.extraContext) {
-      userText = `Analyze the PDF document below. The document language is: ${options.extraContext}. Extract ALL text and structure from every page.`;
+      userText = `Analyze the document pages below. The document language is: ${options.extraContext}. Extract ALL text and structure from every page.`;
     } else {
-      userText = "Analyze the PDF document below and follow the instructions in your system prompt.";
+      userText = "Analyze the document pages below and follow the instructions in your system prompt.";
     }
 
-    // Build multimodal content: text prompt + PDF file
-    const content = [
-      { type: "text" as const, text: userText },
-      {
-        type: "file_url" as const,
-        file_url: { url: pdfDataUri },
-      },
-    ];
+    // Convert PDF to images
+    const imageUris = await pdfToImageUris(options.pdfBuffer);
 
-    // Call Gemini Vision with timeout
-    const completion = await Promise.race([
-      zai.chat.completions.createVision({
-        model: GEMINI_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content },
-        ],
-        stream: false,
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS)
-      ),
-    ]);
-
-    const rawContent =
-      completion?.choices?.[0]?.message?.content ??
-      completion?.content ??
-      "";
-
-    if (!rawContent || typeof rawContent !== "string") {
-      console.error(
-        `[Gemini:${options.tool}] Unexpected response:`,
-        JSON.stringify(completion)?.substring(0, 300)
-      );
+    if (imageUris.length === 0) {
       return {
         success: false,
-        error: "AI returned an unexpected response format.",
+        error: "Could not render any pages from the PDF. The file may be corrupted.",
       };
     }
+
+    // Call Gemini Vision with images
+    const rawContent = await callVisionWithImages(
+      systemPrompt,
+      userText,
+      imageUris,
+      GEMINI_TIMEOUT_MS
+    );
 
     // Parse JSON from response
     const data = extractJson<T>(rawContent);
@@ -277,15 +390,16 @@ export async function callGeminiWithPdf<T = unknown>(
     if (msg === "TIMEOUT") {
       return {
         success: false,
-        error:
-          "AI processing timed out. The document may be too large. Try a smaller PDF.",
+        error: "AI processing timed out. The document may be too large. Try a smaller PDF.",
       };
     }
 
     if (
       msg.toLowerCase().includes("api key") ||
       msg.toLowerCase().includes("not configured") ||
-      msg.toLowerCase().includes("unauthorized")
+      msg.toLowerCase().includes("unauthorized") ||
+      msg.toLowerCase().includes("invalid api key") ||
+      msg.toLowerCase().includes("api_key")
     ) {
       return {
         success: false,
@@ -295,7 +409,9 @@ export async function callGeminiWithPdf<T = unknown>(
 
     if (
       msg.toLowerCase().includes("rate limit") ||
-      msg.toLowerCase().includes("quota")
+      msg.toLowerCase().includes("quota") ||
+      msg.toLowerCase().includes("resource_exhausted") ||
+      msg.toLowerCase().includes("429")
     ) {
       return {
         success: false,
@@ -312,18 +428,25 @@ export async function callGeminiWithPdf<T = unknown>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Core: Call Gemini Text API (text-only, no files)
+// Public API: callGemini (text-only)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Send a text analysis request to Gemini via z-ai-web-dev-sdk.
+ * Send a text analysis request to Gemini.
  * Used as fallback when PDF buffer is not available.
  */
 export async function callGemini<T = unknown>(
   options: GeminiTextOptions
 ): Promise<GeminiResponse<T>> {
   try {
-    const zai = await ZAI.create();
+    if (!GEMINI_API_KEY) {
+      return {
+        success: false,
+        error: "AI service not configured. Please set the GEMINI_API_KEY.",
+      };
+    }
+
+    const genAI = getGenAI();
     const systemPrompt = SYSTEM_PROMPTS[options.tool];
 
     let userMessage = "";
@@ -341,24 +464,23 @@ export async function callGemini<T = unknown>(
           "\n\n[... Document truncated due to length. Analyze the above content.]"
         : userMessage;
 
+    const model = genAI.getGenerativeModel({
+      model: GEMINI_MODEL_NAME,
+      systemInstruction: systemPrompt,
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 8192,
+      },
+    });
+
     const completion = await Promise.race([
-      zai.chat.completions.create({
-        model: GEMINI_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: truncatedMessage },
-        ],
-        stream: false,
-      }),
+      model.generateContent(truncatedMessage),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("TIMEOUT")), TEXT_TIMEOUT_MS)
       ),
     ]);
 
-    const rawContent =
-      completion?.choices?.[0]?.message?.content ??
-      completion?.content ??
-      "";
+    const rawContent = completion.response.text();
 
     if (!rawContent || typeof rawContent !== "string") {
       return {
@@ -375,8 +497,7 @@ export async function callGemini<T = unknown>(
     if (msg === "TIMEOUT") {
       return {
         success: false,
-        error:
-          "AI processing timed out. The document may be too complex. Please try again.",
+        error: "AI processing timed out. The document may be too complex. Please try again.",
       };
     }
 
@@ -405,7 +526,6 @@ export async function callGemini<T = unknown>(
 
 /**
  * Extract valid JSON from Gemini's response.
- * Handles markdown fences, leading/trailing whitespace, etc.
  */
 export function extractJson<T = unknown>(raw: string): T {
   let text = raw.trim();
@@ -430,4 +550,11 @@ export function extractJson<T = unknown>(raw: string): T {
 
     throw new Error("Could not find valid JSON in response");
   }
+}
+
+/**
+ * Get the configured model name (for display purposes).
+ */
+export function getModelName(): string {
+  return GEMINI_MODEL_NAME;
 }
