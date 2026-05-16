@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callGemini, extractTextFromPDF } from "@/lib/gemini";
+import { callGeminiWithPdf } from "@/lib/gemini";
+
+// Force Node.js runtime (not Edge) — Gemini SDK requires Node.js APIs
+export const runtime = "nodejs";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -26,24 +29,39 @@ interface ResumeResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_PDF_SIZE = 20 * 1024 * 1024; // 20MB
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Route Handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   try {
     // ── Parse FormData ──
-    const form = await request.formData();
-    const resumeFile = form.get("resume") as File | null;
-    const jobDescription = (form.get("jobDescription") as string) || "";
-
-    if (!resumeFile) {
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
       return NextResponse.json<ResumeResponse>(
-        { success: false, error: "No resume file provided." },
+        { success: false, error: "Invalid request format. Please upload a valid PDF." },
         { status: 400 }
       );
     }
 
-    // Validate file type
+    const resumeFile = form.get("resume") as File | null;
+    const jobDescription = (form.get("jobDescription") as string) || "";
+
+    // ── Validate inputs ──
+    if (!resumeFile) {
+      return NextResponse.json<ResumeResponse>(
+        { success: false, error: "No resume PDF provided." },
+        { status: 400 }
+      );
+    }
+
     if (
       resumeFile.type !== "application/pdf" &&
       !resumeFile.name.toLowerCase().endsWith(".pdf")
@@ -54,34 +72,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Extract text from resume PDF ──
-    let resumeText: string;
-    try {
-      resumeText = await extractTextFromPDF(resumeFile);
-    } catch (extractErr) {
-      console.error("[Gemini:Resume] Text extraction failed:", extractErr);
+    if (resumeFile.size > MAX_PDF_SIZE) {
+      const sizeMB = (resumeFile.size / 1024 / 1024).toFixed(1);
       return NextResponse.json<ResumeResponse>(
-        {
-          success: false,
-          error: "Failed to read the resume PDF. Please try a text-based PDF.",
-        },
+        { success: false, error: `Resume is too large (${sizeMB} MB). Maximum 20 MB supported.` },
         { status: 400 }
       );
     }
 
-    if (!resumeText || resumeText.trim().length < 30) {
-      return NextResponse.json<ResumeResponse>(
-        {
-          success: false,
-          error:
-            "Could not extract enough text from the resume. Please try a text-based PDF.",
-        },
-        { status: 400 }
-      );
-    }
+    // ── Read PDF buffer ──
+    const pdfBuffer = await resumeFile.arrayBuffer();
 
-    // ── Call Gemini ──
-    const result = await callGemini<{
+    // ── Call Gemini with PDF buffer directly ──
+    const result = await callGeminiWithPdf<{
       atsScore: number;
       grade: string;
       sections: { name: string; found: boolean }[];
@@ -99,8 +102,9 @@ export async function POST(request: NextRequest) {
       };
     }>({
       tool: "resume",
-      text: resumeText,
-      extraContext: jobDescription || undefined,
+      pdfBuffer,
+      fileName: resumeFile.name,
+      extraContext: jobDescription.trim() || undefined,
     });
 
     if (!result.success || !result.data) {
@@ -115,16 +119,13 @@ export async function POST(request: NextRequest) {
     // Validate required fields
     if (typeof data.atsScore !== "number" || !data.grade) {
       return NextResponse.json<ResumeResponse>(
-        {
-          success: false,
-          error: "AI returned an invalid score. Please try again.",
-        },
+        { success: false, error: "AI returned an invalid score. Please try again." },
         { status: 502 }
       );
     }
 
     // Clamp score to 0-100
-    data.atsScore = Math.max(0, Math.min(100, data.atsScore));
+    data.atsScore = Math.max(0, Math.min(100, Math.round(data.atsScore)));
 
     return NextResponse.json<ResumeResponse>({
       success: true,
@@ -136,10 +137,7 @@ export async function POST(request: NextRequest) {
       strengths: data.strengths || [],
       weaknesses: data.weaknesses || [],
       suggestions: data.suggestions || [],
-      stats: data.stats || {
-        totalWords: countWords(resumeText),
-        pageCount: 1,
-      },
+      stats: data.stats || { totalWords: 0, pageCount: 1 },
       scoreBreakdown: data.scoreBreakdown || {
         sectionScore: 0,
         keywordScore: 0,
@@ -151,19 +149,8 @@ export async function POST(request: NextRequest) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[Gemini:Resume] Unhandled error:", msg);
     return NextResponse.json<ResumeResponse>(
-      {
-        success: false,
-        error: "An unexpected error occurred. Please try again.",
-      },
+      { success: false, error: "An unexpected error occurred. Please try again." },
       { status: 500 }
     );
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-function countWords(text: string): number {
-  return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
 }
