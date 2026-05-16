@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callGemini, extractTextFromPDF } from "@/lib/gemini";
+import { callGeminiWithPdf } from "@/lib/gemini";
+
+// Force Node.js runtime (not Edge) — Gemini SDK requires Node.js APIs
+export const runtime = "nodejs";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -15,23 +18,38 @@ interface NotesResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_PDF_SIZE = 20 * 1024 * 1024; // 20MB
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Route Handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   try {
     // ── Parse FormData ──
-    const form = await request.formData();
-    const file = form.get("file") as File | null;
-
-    if (!file) {
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
       return NextResponse.json<NotesResponse>(
-        { success: false, error: "No file provided." },
+        { success: false, error: "Invalid request format. Please upload a valid PDF." },
         { status: 400 }
       );
     }
 
-    // Validate file type
+    const file = form.get("file") as File | null;
+
+    // ── Validate inputs ──
+    if (!file) {
+      return NextResponse.json<NotesResponse>(
+        { success: false, error: "No PDF file provided." },
+        { status: 400 }
+      );
+    }
+
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
       return NextResponse.json<NotesResponse>(
         { success: false, error: "Please upload a PDF file." },
@@ -39,34 +57,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Extract text from PDF ──
-    let text: string;
-    try {
-      text = await extractTextFromPDF(file);
-    } catch (extractErr) {
-      console.error("[Gemini:Notes] Text extraction failed:", extractErr);
+    if (file.size > MAX_PDF_SIZE) {
+      const sizeMB = (file.size / 1024 / 1024).toFixed(1);
       return NextResponse.json<NotesResponse>(
-        { success: false, error: "Failed to read the PDF. Please try a text-based PDF." },
+        { success: false, error: `PDF is too large (${sizeMB} MB). Maximum 20 MB supported.` },
         { status: 400 }
       );
     }
 
-    if (!text || text.trim().length < 50) {
-      return NextResponse.json<NotesResponse>(
-        { success: false, error: "Could not extract enough text from this PDF. Please try a text-based PDF." },
-        { status: 400 }
-      );
-    }
+    // ── Read PDF buffer ──
+    const pdfBuffer = await file.arrayBuffer();
 
-    // ── Call Gemini ──
-    const result = await callGemini<{
+    // ── Call Gemini with PDF buffer directly ──
+    const result = await callGeminiWithPdf<{
       title: string;
       sections: { heading: string; content: string[] }[];
       totalSections: number;
       wordCount: number;
     }>({
       tool: "notes",
-      text,
+      pdfBuffer,
+      fileName: file.name,
     });
 
     if (!result.success || !result.data) {
@@ -91,7 +102,7 @@ export async function POST(request: NextRequest) {
       title: data.title || "Untitled Document",
       sections: data.sections,
       totalSections: data.totalSections || data.sections.length,
-      wordCount: data.wordCount || countWords(text),
+      wordCount: data.wordCount || 0,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -101,12 +112,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-function countWords(text: string): number {
-  return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
 }
