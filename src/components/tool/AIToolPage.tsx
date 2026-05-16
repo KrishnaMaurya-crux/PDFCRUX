@@ -111,7 +111,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
     bgColor: "bg-amber-50",
     actionText: "Generate Summary",
     maxFileSize: 50,
-    engineBadge: "gemini-1.5-flash-8b",
+    engineBadge: "gemini-2.0-flash",
     steps: [
       "Uploading PDF to AI engine...",
       "Gemini is analyzing content...",
@@ -189,7 +189,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
     bgColor: "bg-emerald-50",
     actionText: "Generate Notes",
     maxFileSize: 50,
-    engineBadge: "gemini-1.5-flash-8b",
+    engineBadge: "gemini-2.0-flash",
     steps: [
       "Uploading PDF to AI engine...",
       "Gemini is detecting structure...",
@@ -267,7 +267,7 @@ const toolMetaMap: Record<ToolId, ToolMeta> = {
     bgColor: "bg-blue-50",
     actionText: "Analyze Resume",
     maxFileSize: 10,
-    engineBadge: "gemini-1.5-flash-8b",
+    engineBadge: "gemini-2.0-flash",
     steps: [
       "Uploading resume to AI engine...",
       "Gemini is analyzing sections...",
