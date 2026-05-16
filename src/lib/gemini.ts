@@ -2,7 +2,7 @@
  * Shared Gemini AI Engine for PdfCrux
  *
  * Central utility for all Gemini API interactions across PdfCrux AI tools.
- * Uses the official @google/generative-ai SDK directly.
+ * Uses the Google Gemini REST API directly via fetch() — ZERO external dependencies.
  *
  * Configuration (via environment variables):
  *   GEMINI_API_KEY    — Your Google AI Studio API key
@@ -15,14 +15,13 @@
  * Each tool has its own SYSTEM_PROMPT defined here.
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration — reads from environment variables
 // ─────────────────────────────────────────────────────────────────────────────
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL_NAME = process.env.GEMINI_MODEL_NAME || "gemini-2.0-flash";
+const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_TIMEOUT_MS = 120_000; // 120 seconds for PDF analysis
 const TEXT_TIMEOUT_MS = 90_000; // 90 seconds for text-only analysis
 
@@ -187,16 +186,69 @@ export interface GeminiResponse<T = unknown> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SDK Initialization
+// Gemini REST API — Direct fetch(), ZERO dependencies
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getGenAI(): GoogleGenerativeAI {
-  if (!GEMINI_API_KEY) {
-    throw new Error(
-      "GEMINI_API_KEY is not configured. Please set the environment variable."
-    );
+/**
+ * Call the Gemini REST API with the given contents (multimodal parts).
+ * Uses fetch() directly — no SDK needed.
+ */
+async function callGeminiRestApi(
+  systemPrompt: string,
+  parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }>,
+  timeoutMs: number
+): Promise<string> {
+  const url = `${GEMINI_BASE_URL}/${GEMINI_MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+
+  const body = {
+    systemInstruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    contents: [
+      {
+        role: "user",
+        parts,
+      },
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 8192,
+    },
+  };
+
+  const response = await Promise.race([
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs)
+    ),
+  ]);
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const errorMsg =
+      errorData?.error?.message || `HTTP ${response.status}`;
+    throw new Error(errorMsg);
   }
-  return new GoogleGenerativeAI(GEMINI_API_KEY);
+
+  const data = await response.json();
+
+  // Extract text from Gemini response: data.candidates[0].content.parts[0].text
+  const text =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+  if (!text) {
+    const blockReason = data?.candidates?.[0]?.finishReason;
+    if (blockReason === "SAFETY") {
+      throw new Error("Content was blocked by safety filters. Try a different document.");
+    }
+    throw new Error("AI returned an empty response.");
+  }
+
+  return text;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,19 +274,11 @@ export async function pdfToImageUris(
 
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
-
-    // Render at 1.5x scale for good quality
     const scale = 1.5;
     const viewport = page.getViewport({ scale });
-
-    // Create a canvas and render
     const canvas = await page.render({ viewport }).promise;
-
-    // Get JPEG buffer from canvas
     const jpegDataUri = canvas.toDataURL("image/jpeg", 0.85);
     uris.push(jpegDataUri);
-
-    // Clean up
     canvas.width = 0;
     canvas.height = 0;
   }
@@ -256,17 +300,6 @@ async function callVisionWithImages(
   imageUris: string[],
   timeoutMs: number
 ): Promise<string> {
-  const genAI = getGenAI();
-
-  // Use the model with image generation capabilities
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL_NAME,
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 8192,
-    },
-  });
-
   // Split into batches if needed
   const batches: string[][] = [];
   for (let i = 0; i < imageUris.length; i += MAX_IMAGES_PER_REQUEST) {
@@ -279,16 +312,17 @@ async function callVisionWithImages(
     const batch = batches[b];
     const isFirstBatch = b === 0;
 
-    // Build the prompt text
-    const promptText = isFirstBatch
-      ? `${systemPrompt}\n\n${userText}`
-      : "Continue extracting content from the next pages. Follow the same format as before.";
-
     // Build parts: text prompt + images
     const parts: Array<
       | { text: string }
       | { inlineData: { mimeType: string; data: string } }
-    > = [{ text: promptText }];
+    > = [];
+
+    if (isFirstBatch) {
+      parts.push({ text: userText });
+    } else {
+      parts.push({ text: "Continue extracting content from the next pages. Follow the same format as before." });
+    }
 
     for (const uri of batch) {
       // Extract base64 data from data URI
@@ -303,20 +337,13 @@ async function callVisionWithImages(
       }
     }
 
-    const completion = await Promise.race([
-      model.generateContent(parts),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs)
-      ),
-    ]);
+    const batchResponse = await callGeminiRestApi(
+      systemPrompt,
+      parts,
+      timeoutMs
+    );
 
-    const rawContent = completion.response.text();
-
-    if (!rawContent || typeof rawContent !== "string") {
-      throw new Error("AI returned an unexpected response format.");
-    }
-
-    fullResponse += rawContent;
+    fullResponse += batchResponse;
   }
 
   return fullResponse;
@@ -399,11 +426,13 @@ export async function callGeminiWithPdf<T = unknown>(
       msg.toLowerCase().includes("not configured") ||
       msg.toLowerCase().includes("unauthorized") ||
       msg.toLowerCase().includes("invalid api key") ||
-      msg.toLowerCase().includes("api_key")
+      msg.toLowerCase().includes("api_key") ||
+      msg.toLowerCase().includes("401") ||
+      msg.toLowerCase().includes("403")
     ) {
       return {
         success: false,
-        error: "AI service not configured. Please set the GEMINI_API_KEY.",
+        error: "AI service not configured. Please set a valid GEMINI_API_KEY.",
       };
     }
 
@@ -446,7 +475,6 @@ export async function callGemini<T = unknown>(
       };
     }
 
-    const genAI = getGenAI();
     const systemPrompt = SYSTEM_PROMPTS[options.tool];
 
     let userMessage = "";
@@ -464,25 +492,13 @@ export async function callGemini<T = unknown>(
           "\n\n[... Document truncated due to length. Analyze the above content.]"
         : userMessage;
 
-    const model = genAI.getGenerativeModel({
-      model: GEMINI_MODEL_NAME,
-      systemInstruction: systemPrompt,
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 8192,
-      },
-    });
+    const rawContent = await callGeminiRestApi(
+      systemPrompt,
+      [{ text: truncatedMessage }],
+      TEXT_TIMEOUT_MS
+    );
 
-    const completion = await Promise.race([
-      model.generateContent(truncatedMessage),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), TEXT_TIMEOUT_MS)
-      ),
-    ]);
-
-    const rawContent = completion.response.text();
-
-    if (!rawContent || typeof rawContent !== "string") {
+    if (!rawContent) {
       return {
         success: false,
         error: "AI returned an unexpected response format.",
