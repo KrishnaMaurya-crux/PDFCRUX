@@ -25,7 +25,6 @@ import {
   FileUp,
   Package,
   Sparkles,
-  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -988,7 +987,7 @@ export default function ToolPage() {
             </motion.div>
           )}
 
-          {/* Processing State for PDF-to-Word — adapts to Gemini OCR toggle */}
+          {/* AI-Powered Processing State for PDF-to-Word */}
           {isProcessing && selectedToolId === "pdf-to-word" && (
             <motion.div
               key="ai-processing"
@@ -997,68 +996,47 @@ export default function ToolPage() {
               exit={{ opacity: 0, y: -20 }}
               className="text-center py-16"
             >
-              {/* Animated spinner */}
+              {/* Gemini AI Logo Animation */}
               <div className="relative w-28 h-28 mx-auto mb-8">
                 <motion.div
                   animate={{ rotate: 360 }}
                   transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-                  className={`absolute inset-0 rounded-full border-[3px] border-muted ${optionValues["gemini-ocr"] ? "border-t-amber-500" : "border-t-primary"}`}
+                  className="absolute inset-0 rounded-full border-[3px] border-muted border-t-amber-500"
                 />
                 <motion.div
                   animate={{ rotate: -360 }}
                   transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
-                  className={`absolute inset-2 rounded-full border-2 border-muted ${optionValues["gemini-ocr"] ? "border-b-emerald-500" : "border-b-primary/50"}`}
+                  className="absolute inset-2 rounded-full border-2 border-muted border-b-emerald-500"
                 />
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="relative">
-                    {optionValues["gemini-ocr"] ? (
-                      <>
-                        <Sparkles className="w-10 h-10 text-amber-500" />
-                        <motion.div
-                          animate={{ scale: [1, 1.3, 1], opacity: [0.5, 1, 0.5] }}
-                          transition={{ duration: 2, repeat: Infinity }}
-                          className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full"
-                        />
-                      </>
-                    ) : (
-                      <FileText className="w-10 h-10 text-primary" />
-                    )}
+                    <Sparkles className="w-10 h-10 text-amber-500" />
+                    <motion.div
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.5, 1, 0.5] }}
+                      transition={{ duration: 2, repeat: Infinity }}
+                      className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full"
+                    />
                   </div>
                 </div>
               </div>
 
-              <h2 className="text-xl font-bold mb-2">
-                {optionValues["gemini-ocr"] ? "Gemini AI is Analyzing" : "Extracting Text"}
-              </h2>
+              <h2 className="text-xl font-bold mb-2">Gemini AI is Analyzing</h2>
               <p className="text-sm text-muted-foreground mb-6 max-w-sm mx-auto">
-                {optionValues["gemini-ocr"]
-                  ? "AI engine is reading your PDF, detecting layout, and extracting text with precision..."
-                  : "Reading PDF pages and extracting text content..."}
+                AI engine is reading every page, detecting layout, and extracting text with precision...
               </p>
 
-              {/* Mode badge */}
+              {/* Premium badges */}
               <div className="flex items-center justify-center gap-3 mb-6">
-                {optionValues["gemini-ocr"] ? (
-                  <>
-                    <Badge variant="secondary" className="text-xs gap-1">
-                      <Sparkles className="w-3 h-3" />
-                      Gemini 1.5 Flash
-                    </Badge>
-                    <Badge variant="outline" className="text-xs">
-                      Native PDF
-                    </Badge>
-                  </>
-                ) : (
-                  <>
-                    <Badge variant="secondary" className="text-xs gap-1">
-                      <Zap className="w-3 h-3" />
-                      Fast Extraction
-                    </Badge>
-                    <Badge variant="outline" className="text-xs">
-                      Client-Side
-                    </Badge>
-                  </>
-                )}
+                <Badge variant="secondary" className="text-xs gap-1">
+                  <Sparkles className="w-3 h-3" />
+                  Gemini 1.5 Flash
+                </Badge>
+                <Badge variant="outline" className="text-xs">
+                  Zero Limits
+                </Badge>
+                <Badge variant="outline" className="text-xs">
+                  Adobe-Quality
+                </Badge>
               </div>
 
               {/* Step-by-step progress */}
