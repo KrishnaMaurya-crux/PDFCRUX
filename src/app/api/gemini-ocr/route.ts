@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Force Node.js runtime (not Edge) — PDF rendering requires Node.js APIs
+// Force Node.js runtime — required for Buffer operations
 export const runtime = "nodejs";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -46,26 +46,14 @@ const MAX_TOTAL_SIZE = 20 * 1024 * 1024;
 /** Timeout for Gemini API call (60 seconds) */
 const GEMINI_TIMEOUT_MS = 60_000;
 
-/** Model to use — from environment variable with fallback */
+// Read model and API key from environment
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-2.0-flash";
-
-/** Google Gemini REST API base URL */
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Convert a File / Blob into a base64 data-URI string suitable for the
- * Gemini inline data payload.
- */
-async function blobToBase64Parts(blob: Blob): Promise<{ mimeType: string; data: string }> {
-  const buffer = await blob.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  const mime = blob.type || "image/jpeg";
-  return { mimeType: mime, data: base64 };
-}
 
 /**
  * Build the analysis prompt with the target language interpolated.
@@ -130,15 +118,22 @@ function extractJson(raw: string): GeminiPage[] {
   }
 }
 
+/**
+ * Convert a Blob to base64 string.
+ */
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = Buffer.from(await blob.arrayBuffer());
+  return buffer.toString("base64");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Route Handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   try {
-    // ── Step 1: Validate API key ──
-    const apiKey = process.env.GEMINI_API_KEY || "";
-    if (!apiKey) {
+    // ── Step 1: Validate API Key ──
+    if (!GEMINI_API_KEY) {
       return NextResponse.json<GeminiOcrResponse>(
         {
           success: false,
@@ -154,6 +149,7 @@ export async function POST(request: NextRequest) {
     // ── Step 2: Parse incoming FormData ──
     const form = await request.formData();
 
+    // Extract all image files — client sends them under the "images" key
     const imageFiles = form.getAll("images");
     const language = (form.get("language") as string) || "English";
     const batchIndex = Number(form.get("batchIndex")) || 0;
@@ -173,6 +169,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Validate every entry is a Blob
     const blobs = imageFiles.filter((f): f is File | Blob => f instanceof Blob);
     if (blobs.length === 0) {
       return NextResponse.json<GeminiOcrResponse>(
@@ -203,124 +200,88 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Step 4: Convert images to base64 parts ──
-    let imageParts: Array<{ mimeType: string; data: string }>;
-    try {
-      imageParts = await Promise.all(blobs.map((blob) => blobToBase64Parts(blob)));
-    } catch (conversionErr) {
-      console.error("[GeminiOCR] Image conversion failed:", conversionErr);
-      return NextResponse.json<GeminiOcrResponse>(
-        {
-          success: false,
-          pages: [],
-          batchIndex,
-          totalBatches,
-          error: "Failed to process one or more images. Please try different files.",
+    // ── Step 4: Convert images to base64 ──
+    const imageDataUris: Array<{ inlineData: { mimeType: string; data: string } }> = [];
+
+    for (const blob of blobs) {
+      const base64 = await blobToBase64(blob);
+      const mime = blob.type || "image/jpeg";
+      imageDataUris.push({
+        inlineData: {
+          mimeType: mime,
+          data: base64,
         },
-        { status: 400 }
-      );
+      });
     }
 
-    // ── Step 5: Build Gemini REST API request ──
+    // ── Step 5: Build Gemini API request ──
     const prompt = buildPrompt(language);
 
-    // Build parts array for the API
     const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
       { text: prompt },
+      ...imageDataUris,
     ];
 
-    for (const imgPart of imageParts) {
-      parts.push({ inlineData: imgPart });
-    }
-
-    const apiUrl = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+    const url = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
     const requestBody = {
       contents: [
         {
-          role: "user",
           parts,
         },
       ],
       generationConfig: {
-        temperature: 0.1,
+        temperature: 0.2,
         maxOutputTokens: 16384,
+        responseMimeType: "application/json",
       },
     };
 
-    // ── Step 6: Call Gemini REST API with timeout ──
+    // ── Step 6: Call Gemini API with timeout ──
     let rawResponse: string;
     try {
-      const fetchResponse = await Promise.race([
-        fetch(apiUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestBody),
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS)
-        ),
-      ]);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
 
-      if (!fetchResponse.ok) {
-        const errorData = await fetchResponse.json().catch(() => ({}));
-        const errorMsg =
-          errorData?.error?.message || `HTTP ${fetchResponse.status}`;
-        console.error("[GeminiOCR] API error:", errorMsg);
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
 
-        if (fetchResponse.status === 429) {
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error("[GeminiOCR] API error:", response.status, errorBody);
+
+        if (response.status === 403) {
           return NextResponse.json<GeminiOcrResponse>(
-            {
-              success: false,
-              pages: [],
-              batchIndex,
-              totalBatches,
-              error: "AI rate limit reached. Please wait a moment and try again.",
-            },
+            { success: false, pages: [], batchIndex, totalBatches, error: "AI API key is invalid or lacks permission." },
+            { status: 502 }
+          );
+        }
+        if (response.status === 429) {
+          return NextResponse.json<GeminiOcrResponse>(
+            { success: false, pages: [], batchIndex, totalBatches, error: "AI rate limit reached. Please wait and try again." },
             { status: 429 }
           );
         }
-
-        if (fetchResponse.status === 401 || fetchResponse.status === 403) {
-          return NextResponse.json<GeminiOcrResponse>(
-            {
-              success: false,
-              pages: [],
-              batchIndex,
-              totalBatches,
-              error: "AI service not configured. Please set a valid GEMINI_API_KEY.",
-            },
-            { status: 500 }
-          );
-        }
-
         return NextResponse.json<GeminiOcrResponse>(
-          {
-            success: false,
-            pages: [],
-            batchIndex,
-            totalBatches,
-            error: "AI service request failed. Please try again.",
-          },
+          { success: false, pages: [], batchIndex, totalBatches, error: `AI service error (${response.status}). Please try again.` },
           { status: 502 }
         );
       }
 
-      const data = await fetchResponse.json();
+      const data = await response.json();
 
-      // Extract text: data.candidates[0].content.parts[0].text
       rawResponse = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
 
       if (!rawResponse || typeof rawResponse !== "string") {
         console.error("[GeminiOCR] Unexpected response shape:", JSON.stringify(data).substring(0, 500));
         return NextResponse.json<GeminiOcrResponse>(
-          {
-            success: false,
-            pages: [],
-            batchIndex,
-            totalBatches,
-            error: "AI returned an unexpected response format.",
-          },
+          { success: false, pages: [], batchIndex, totalBatches, error: "AI returned an unexpected response format." },
           { status: 502 }
         );
       }
@@ -328,27 +289,15 @@ export async function POST(request: NextRequest) {
       const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
       console.error("[GeminiOCR] API call failed:", msg);
 
-      if (msg === "TIMEOUT") {
+      if (msg.includes("abort")) {
         return NextResponse.json<GeminiOcrResponse>(
-          {
-            success: false,
-            pages: [],
-            batchIndex,
-            totalBatches,
-            error: "AI processing timed out. The document may be too complex. Try splitting into smaller batches.",
-          },
+          { success: false, pages: [], batchIndex, totalBatches, error: "AI processing timed out. Try splitting into smaller batches." },
           { status: 504 }
         );
       }
 
       return NextResponse.json<GeminiOcrResponse>(
-        {
-          success: false,
-          pages: [],
-          batchIndex,
-          totalBatches,
-          error: "AI service request failed. Please try again.",
-        },
+        { success: false, pages: [], batchIndex, totalBatches, error: "AI service request failed. Please try again." },
         { status: 502 }
       );
     }
@@ -361,13 +310,7 @@ export async function POST(request: NextRequest) {
       console.error("[GeminiOCR] JSON parse failed:", parseErr);
       console.error("[GeminiOCR] Raw response (first 500 chars):", rawResponse.substring(0, 500));
       return NextResponse.json<GeminiOcrResponse>(
-        {
-          success: false,
-          pages: [],
-          batchIndex,
-          totalBatches,
-          error: "AI returned an invalid response. Please try again.",
-        },
+        { success: false, pages: [], batchIndex, totalBatches, error: "AI returned an invalid response. Please try again." },
         { status: 502 }
       );
     }
@@ -380,18 +323,12 @@ export async function POST(request: NextRequest) {
       totalBatches,
     });
   } catch (initErr) {
-    // Catch-all: unexpected errors, etc.
+    // Catch-all: unexpected errors
     const msg = initErr instanceof Error ? initErr.message : String(initErr);
     console.error("[GeminiOCR] Unhandled error:", msg);
 
     return NextResponse.json<GeminiOcrResponse>(
-      {
-        success: false,
-        pages: [],
-        batchIndex: 0,
-        totalBatches: 1,
-        error: "An unexpected error occurred. Please try again.",
-      },
+      { success: false, pages: [], batchIndex: 0, totalBatches: 1, error: "An unexpected error occurred. Please try again." },
       { status: 500 }
     );
   }
