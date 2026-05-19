@@ -12,6 +12,7 @@ import ToolPage from "@/components/tool/ToolPage";
 import BulkCompressPDF from "@/components/tool/BulkCompressPDF";
 import InvoiceGenerator from "@/components/tool/InvoiceGenerator";
 import AIToolPage from "@/components/tool/AIToolPage";
+import PdfOcrTool from "@/components/tool/PdfOcrTool";
 import HistoryPanel from "@/components/HistoryPanel";
 import PricingPage from "@/components/PricingPage";
 import {
@@ -138,6 +139,17 @@ export default function Home() {
             className="flex-1"
           >
             <InvoiceGenerator />
+          </motion.main>
+        ) : selectedToolId === "pdf-ocr" ? (
+          <motion.main
+            key="pdf-ocr"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+            className="flex-1"
+          >
+            <PdfOcrTool />
           </motion.main>
         ) : selectedToolId && ["pdf-summary", "pdf-notes", "resume-checker"].includes(selectedToolId) ? (
           <motion.main
