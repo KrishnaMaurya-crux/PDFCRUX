@@ -1,13 +1,13 @@
 /**
  * History Module — Client-side functions for history management.
  *
- * Uses the API routes for server-side persistence.
- * Falls back gracefully if the user is not authenticated.
- *
- * Key insight: The backend returns { history: [...] } wrapped in an object.
- * getHistory() returns { entries, authenticated } so the UI can distinguish
- * between "user not logged in" and "user has no history".
+ * Auth strategy: Supabase stores session in localStorage (browser).
+ * The server cannot access localStorage, so we send the Supabase access_token
+ * in the Authorization header with every request. The server uses this token
+ * to verify the user via supabase.auth.getUser(token).
  */
+
+import { supabase } from "@/lib/supabase";
 
 export interface HistoryEntry {
   id: string;
@@ -35,6 +35,36 @@ const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }
   "pdf-ocr": { color: "text-purple-600", bgColor: "bg-purple-50", icon: "🔍" },
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth Header Helper
+//
+// Supabase stores session in localStorage → server never sees cookies.
+// Solution: Read the access_token from the Supabase client session and send
+// it as an Authorization: Bearer <token> header to every API call.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+
+  try {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (session?.access_token) {
+      headers["Authorization"] = `Bearer ${session.access_token}`;
+    }
+  } catch {
+    // Supabase not available — proceed without auth
+  }
+
+  return headers;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API Functions
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Save a tool usage entry to history.
  * Silently fails if not authenticated — history is non-critical.
@@ -47,10 +77,13 @@ export async function saveHistory(params: {
   resultSummary: string;
 }): Promise<boolean> {
   try {
+    const authHeaders = await getAuthHeaders();
     const res = await fetch("/api/history", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
       body: JSON.stringify(params),
     });
     return res.ok;
@@ -70,11 +103,18 @@ export async function saveHistory(params: {
  */
 export async function getHistory(): Promise<HistoryResult> {
   try {
+    const authHeaders = await getAuthHeaders();
+
+    // If no auth header, user is definitely not logged in
+    if (!authHeaders["Authorization"]) {
+      return { entries: [], authenticated: false };
+    }
+
     const res = await fetch("/api/history", {
-      credentials: "include",
+      headers: authHeaders,
     });
 
-    // 401 = user is not logged in
+    // 401 = token invalid or expired
     if (res.status === 401) {
       return { entries: [], authenticated: false };
     }
@@ -100,9 +140,10 @@ export async function getHistory(): Promise<HistoryResult> {
  */
 export async function deleteHistoryItem(id: string): Promise<boolean> {
   try {
+    const authHeaders = await getAuthHeaders();
     const res = await fetch(`/api/history?id=${encodeURIComponent(id)}`, {
       method: "DELETE",
-      credentials: "include",
+      headers: authHeaders,
     });
     return res.ok;
   } catch {
@@ -115,10 +156,13 @@ export async function deleteHistoryItem(id: string): Promise<boolean> {
  */
 export async function markDownloaded(id: string): Promise<boolean> {
   try {
+    const authHeaders = await getAuthHeaders();
     const res = await fetch("/api/history", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
       body: JSON.stringify({ id, downloaded: true }),
     });
     return res.ok;
@@ -126,6 +170,10 @@ export async function markDownloaded(id: string): Promise<boolean> {
     return false;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Display Helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Get tool display metadata.
