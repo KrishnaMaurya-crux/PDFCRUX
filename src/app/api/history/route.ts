@@ -1,104 +1,113 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { db } from "@/lib/db";
 import { isSupabaseConfigured } from "@/lib/supabase";
-import { cookies } from "next/headers";
+import type { User } from "@supabase/supabase-js";
 
-// Force Node.js runtime — required for cookie access
+// Force Node.js runtime — required for database access
 export const runtime = "nodejs";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Server-side Supabase Client (per-request, cookie-aware)
+// Auth Strategy: Bearer Token via Authorization Header
 //
-// The global `supabase` client from lib/supabase.ts is created at module load
-// time and has NO access to incoming request cookies. This means
-// `supabase.auth.getSession()` always returns null on the server → 401.
+// PROBLEM: Supabase JS client stores session in localStorage (browser).
+// The server has NO access to localStorage or cookies for Supabase sessions.
+// So supabase.auth.getSession() ALWAYS returns null on the server → 401.
 //
-// Fix: Create a fresh Supabase client per request that reads/writes cookies
-// from the incoming HTTP request via `next/headers`.
+// SOLUTION: Client sends access_token in Authorization: Bearer <token> header.
+// Server uses supabase.auth.getUser(token) to verify the token and get user info.
+// This is the official Supabase recommendation for Next.js Route Handlers.
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function getServerSupabase() {
+function createServerSupabase(): SupabaseClient | null {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return null;
-  }
-
-  const cookieStore = await cookies();
-
-  return createClient(supabaseUrl, supabaseAnonKey, {
-    cookies: {
-      getAll() {
-        return cookieStore.getAll();
-      },
-      setAll(cookiesToSet) {
-        try {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options),
-          );
-        } catch {
-          // setAll can fail in Route Handlers when trying to mutate cookies
-          // after response headers have been sent. Safe to ignore.
-        }
-      },
-    },
-  });
+  if (!supabaseUrl || !supabaseAnonKey) return null;
+  return createClient(supabaseUrl, supabaseAnonKey);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auth Helper — authenticate user from cookies, return user or null
+// Auth Helper — verify Bearer token, return Supabase user or error
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function authenticateRequest() {
-  if (!isSupabaseConfigured) return { user: null, error: "auth_not_configured" };
+interface AuthResult {
+  user: User | null;
+  localUserId: string | null;
+  error: "not_configured" | "no_token" | "invalid_token" | null;
+}
 
-  const serverSupabase = await getServerSupabase();
-  if (!serverSupabase) return { user: null, error: "auth_not_configured" };
-
-  const {
-    data: { session },
-  } = await serverSupabase.auth.getSession();
-
-  if (!session?.user) {
-    return { user: null, error: "unauthorized" };
+async function authenticateRequest(req: Request): Promise<AuthResult> {
+  if (!isSupabaseConfigured) {
+    return { user: null, localUserId: null, error: "not_configured" };
   }
 
-  // Find or create local user in SQLite
-  let localUser = await db.user.findUnique({
-    where: { email: session.user.email! },
-  });
+  // 1. Extract Bearer token from Authorization header
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return { user: null, localUserId: null, error: "no_token" };
+  }
+
+  const token = authHeader.substring(7).trim();
+  if (!token) {
+    return { user: null, localUserId: null, error: "no_token" };
+  }
+
+  // 2. Verify the token with Supabase
+  const serverSupabase = createServerSupabase();
+  if (!serverSupabase) {
+    return { user: null, localUserId: null, error: "not_configured" };
+  }
+
+  const {
+    data: { user },
+    error,
+  } = await serverSupabase.auth.getUser(token);
+
+  if (error || !user) {
+    console.warn("[History Auth] Token verification failed:", error?.message);
+    return { user: null, localUserId: null, error: "invalid_token" };
+  }
+
+  // 3. Find or create local user in SQLite
+  const email = user.email;
+  if (!email) {
+    return { user: null, localUserId: null, error: "invalid_token" };
+  }
+
+  let localUser = await db.user.findUnique({ where: { email } });
   if (!localUser) {
     localUser = await db.user.create({
       data: {
-        email: session.user.email!,
+        email,
         name:
-          session.user.user_metadata?.full_name ||
-          session.user.email?.split("@")[0],
+          user.user_metadata?.full_name ||
+          user.user_metadata?.name ||
+          email.split("@")[0],
+        image: user.user_metadata?.avatar_url || null,
       },
     });
   }
 
-  return { user: localUser, error: null };
+  return { user, localUserId: localUser.id, error: null };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/history — fetch user's history
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const { user, error: authError } = await authenticateRequest();
+    const { localUserId, error: authError } = await authenticateRequest(req);
 
-    if (authError === "auth_not_configured") {
+    if (authError === "not_configured") {
       return NextResponse.json(
         { error: "Authentication not configured", history: [] },
         { status: 503 },
       );
     }
 
-    if (authError === "unauthorized") {
+    if (authError) {
       return NextResponse.json(
         { error: "Unauthorized", history: [] },
         { status: 401 },
@@ -106,7 +115,7 @@ export async function GET() {
     }
 
     const history = await db.history.findMany({
-      where: { userId: user!.id },
+      where: { userId: localUserId! },
       orderBy: { createdAt: "desc" },
       take: 100,
     });
@@ -127,16 +136,16 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const { user, error: authError } = await authenticateRequest();
+    const { localUserId, error: authError } = await authenticateRequest(req);
 
-    if (authError === "auth_not_configured") {
+    if (authError === "not_configured") {
       return NextResponse.json(
         { error: "Authentication not configured" },
         { status: 503 },
       );
     }
 
-    if (authError === "unauthorized") {
+    if (authError) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -152,7 +161,7 @@ export async function POST(req: Request) {
 
     const entry = await db.history.create({
       data: {
-        userId: user!.id,
+        userId: localUserId!,
         toolId,
         toolName,
         fileName,
@@ -177,16 +186,16 @@ export async function POST(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const { user, error: authError } = await authenticateRequest();
+    const { localUserId, error: authError } = await authenticateRequest(req);
 
-    if (authError === "auth_not_configured") {
+    if (authError === "not_configured") {
       return NextResponse.json(
         { error: "Authentication not configured" },
         { status: 503 },
       );
     }
 
-    if (authError === "unauthorized") {
+    if (authError) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -201,7 +210,7 @@ export async function DELETE(req: Request) {
 
     // Verify ownership
     const entry = await db.history.findFirst({
-      where: { id, userId: user!.id },
+      where: { id, userId: localUserId! },
     });
     if (!entry) {
       return NextResponse.json({ error: "Entry not found" }, { status: 404 });
@@ -225,16 +234,16 @@ export async function DELETE(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const { user, error: authError } = await authenticateRequest();
+    const { localUserId, error: authError } = await authenticateRequest(req);
 
-    if (authError === "auth_not_configured") {
+    if (authError === "not_configured") {
       return NextResponse.json(
         { error: "Authentication not configured" },
         { status: 503 },
       );
     }
 
-    if (authError === "unauthorized") {
+    if (authError) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -246,7 +255,7 @@ export async function PATCH(req: Request) {
 
     // Verify ownership
     const entry = await db.history.findFirst({
-      where: { id, userId: user!.id },
+      where: { id, userId: localUserId! },
     });
     if (!entry) {
       return NextResponse.json({ error: "Entry not found" }, { status: 404 });
