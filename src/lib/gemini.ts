@@ -4,7 +4,8 @@
  * Central utility for all Gemini API interactions across PdfCrux AI tools.
  * Uses the official @google/generative-ai SDK.
  *
- * Model: process.env.GEMINI_MODEL_NAME (default: gemini-3.0-flash)
+ * Model: process.env.GEMINI_MODEL_NAME (default: gemini-3-flash-preview)
+ * Fallback: gemini-2.5-flash (auto-retry if primary model fails)
  * API Key: process.env.GEMINI_API_KEY
  *
  * Two calling modes:
@@ -21,7 +22,8 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-3.0-flash";
+const GEMINI_MODEL_PRIMARY = process.env.GEMINI_MODEL_NAME || "gemini-3-flash-preview";
+const GEMINI_MODEL_FALLBACK = "gemini-2.5-flash";
 
 const GEMINI_TIMEOUT_MS = 120_000; // 120 seconds for PDF analysis
 const TEXT_TIMEOUT_MS = 90_000; // 90 seconds for text-only analysis
@@ -65,6 +67,22 @@ function getGenAI(): GoogleGenerativeAI {
     genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
   }
   return genAI;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model Fallback Helper
+// If the primary model fails with "not found" / "does not exist",
+// automatically retry with the fallback model (gemini-2.5-flash).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isModelNotFoundError(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("not found") ||
+    lower.includes("does not exist") ||
+    lower.includes("model not available") ||
+    lower.includes("model does not support")
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,162 +244,197 @@ export interface GeminiResponse<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
+  /** Which model was actually used (useful for debugging) */
+  modelUsed?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core: Send PDF directly to Gemini via inlineData (official SDK)
+// Supports automatic model fallback: primary → gemini-2.5-flash
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Send a PDF file directly to Gemini via the official SDK.
  * Uses inlineData — Gemini natively reads PDF files. NO image conversion needed.
+ * If the primary model fails with "not found", retries with gemini-2.5-flash.
  */
 export async function callGeminiWithPdf<T = unknown>(
   options: GeminiPdfOptions,
 ): Promise<GeminiResponse<T>> {
-  try {
-    // Validate PDF size
-    if (options.pdfBuffer.byteLength > MAX_PDF_SIZE) {
-      const sizeMB = (options.pdfBuffer.byteLength / 1024 / 1024).toFixed(1);
-      return {
-        success: false,
-        error: `PDF is too large (${sizeMB} MB). Maximum 20 MB supported.`,
-      };
-    }
-
-    const systemPrompt = SYSTEM_PROMPTS[options.tool];
-
-    // Build user message text
-    let userText: string;
-    if (options.tool === "resume" && options.extraContext) {
-      userText = `Analyze the resume PDF below. Also consider this JOB DESCRIPTION for keyword matching:\n\n${options.extraContext}`;
-    } else if (options.tool === "ocr" && options.extraContext) {
-      userText = `Analyze the PDF document below. The document language is: ${options.extraContext}. Extract ALL text and structure from every page.`;
-    } else {
-      userText =
-        "Analyze the PDF document below and follow the instructions in your system prompt.";
-    }
-
-    // Rate limit: wait before making the API call
-    await waitForRateLimit();
-
-    // Initialize SDK and get model
-    const ai = getGenAI();
-    const model = ai.getGenerativeModel({
-      model: GEMINI_MODEL,
-      systemInstruction: systemPrompt,
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 8192,
-        responseMimeType: "application/json",
-      },
-    });
-
-    // Convert PDF buffer to base64
-    const base64 = Buffer.from(options.pdfBuffer).toString("base64");
-
-    // Send PDF with text prompt
-    const result = await Promise.race([
-      model.generateContent([
-        { text: userText },
-        {
-          inlineData: {
-            mimeType: "application/pdf",
-            data: base64,
-          },
-        },
-      ]),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS),
-      ),
-    ]);
-
-    const response = result.response;
-    const rawContent = response.text();
-
-    if (!rawContent) {
-      return {
-        success: false,
-        error: "AI returned an empty response. Please try again.",
-      };
-    }
-
-    // Parse JSON from response
-    const data = extractJson<T>(rawContent);
-    return { success: true, data };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return handleApiError(options.tool, msg);
+  // Validate PDF size
+  if (options.pdfBuffer.byteLength > MAX_PDF_SIZE) {
+    const sizeMB = (options.pdfBuffer.byteLength / 1024 / 1024).toFixed(1);
+    return {
+      success: false,
+      error: `PDF is too large (${sizeMB} MB). Maximum 20 MB supported.`,
+    };
   }
+
+  const systemPrompt = SYSTEM_PROMPTS[options.tool];
+
+  // Build user message text
+  let userText: string;
+  if (options.tool === "resume" && options.extraContext) {
+    userText = `Analyze the resume PDF below. Also consider this JOB DESCRIPTION for keyword matching:\n\n${options.extraContext}`;
+  } else if (options.tool === "ocr" && options.extraContext) {
+    userText = `Analyze the PDF document below. The document language is: ${options.extraContext}. Extract ALL text and structure from every page.`;
+  } else {
+    userText = "Analyze the PDF document below and follow the instructions in your system prompt.";
+  }
+
+  // Convert PDF buffer to base64 (reused for both primary + fallback)
+  const base64 = Buffer.from(options.pdfBuffer).toString("base64");
+  const parts = [
+    { text: userText },
+    { inlineData: { mimeType: "application/pdf", data: base64 } },
+  ];
+
+  // Try primary model, then fallback
+  const modelsToTry = [GEMINI_MODEL_PRIMARY, GEMINI_MODEL_FALLBACK];
+
+  for (const model of modelsToTry) {
+    try {
+      // Rate limit: wait before making the API call
+      await waitForRateLimit();
+
+      const ai = getGenAI();
+      const genModel = ai.getGenerativeModel({
+        model,
+        systemInstruction: systemPrompt,
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 8192,
+          responseMimeType: "application/json",
+        },
+      });
+
+      const result = await Promise.race([
+        genModel.generateContent(parts),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS),
+        ),
+      ]);
+
+      const response = result.response;
+      const rawContent = response.text();
+
+      if (!rawContent) {
+        continue; // Try fallback for empty response
+      }
+
+      const data = extractJson<T>(rawContent);
+      console.log(`[Gemini:${options.tool}] Success with model: ${model}`);
+      return { success: true, data, modelUsed: model };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // If model not found → try fallback
+      if (isModelNotFoundError(msg)) {
+        console.warn(
+          `[Gemini:${options.tool}] Model "${model}" not available. Trying fallback "${GEMINI_MODEL_FALLBACK}"...`,
+        );
+        continue;
+      }
+
+      // Timeout, quota, etc. → don't retry, return error immediately
+      return handleApiError(options.tool, msg);
+    }
+  }
+
+  // Both models failed
+  return {
+    success: false,
+    error: `AI model "${GEMINI_MODEL_PRIMARY}" is unavailable and fallback "${GEMINI_MODEL_FALLBACK}" also failed. Check your GEMINI_MODEL_NAME setting.`,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core: Call Gemini Text API (text-only, no files)
+// Supports automatic model fallback: primary → gemini-2.5-flash
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Send a text analysis request to Gemini via the official SDK.
  * Used as fallback when PDF buffer is not available.
+ * If the primary model fails with "not found", retries with gemini-2.5-flash.
  */
 export async function callGemini<T = unknown>(
   options: GeminiTextOptions,
 ): Promise<GeminiResponse<T>> {
-  try {
-    const systemPrompt = SYSTEM_PROMPTS[options.tool];
+  const systemPrompt = SYSTEM_PROMPTS[options.tool];
 
-    let userMessage = "";
-    if (options.tool === "resume" && options.extraContext) {
-      userMessage = `RESUME TEXT:\n${options.text}\n\n---\n\nJOB DESCRIPTION:\n${options.extraContext}`;
-    } else {
-      userMessage = options.text;
-    }
-
-    // Truncate if too long
-    const MAX_CHARS = 100_000;
-    const truncatedMessage =
-      userMessage.length > MAX_CHARS
-        ? userMessage.slice(0, MAX_CHARS) +
-          "\n\n[... Document truncated due to length. Analyze the above content.]"
-        : userMessage;
-
-    // Rate limit: wait before making the API call
-    await waitForRateLimit();
-
-    // Initialize SDK and get model
-    const ai = getGenAI();
-    const model = ai.getGenerativeModel({
-      model: GEMINI_MODEL,
-      systemInstruction: systemPrompt,
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 8192,
-        responseMimeType: "application/json",
-      },
-    });
-
-    const result = await Promise.race([
-      model.generateContent(truncatedMessage),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), TEXT_TIMEOUT_MS),
-      ),
-    ]);
-
-    const response = result.response;
-    const rawContent = response.text();
-
-    if (!rawContent) {
-      return {
-        success: false,
-        error: "AI returned an empty response. Please try again.",
-      };
-    }
-
-    const data = extractJson<T>(rawContent);
-    return { success: true, data };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return handleApiError(options.tool, msg);
+  let userMessage = "";
+  if (options.tool === "resume" && options.extraContext) {
+    userMessage = `RESUME TEXT:\n${options.text}\n\n---\n\nJOB DESCRIPTION:\n${options.extraContext}`;
+  } else {
+    userMessage = options.text;
   }
+
+  // Truncate if too long
+  const MAX_CHARS = 100_000;
+  const truncatedMessage =
+    userMessage.length > MAX_CHARS
+      ? userMessage.slice(0, MAX_CHARS) +
+        "\n\n[... Document truncated due to length. Analyze the above content.]"
+      : userMessage;
+
+  // Try primary model, then fallback
+  const modelsToTry = [GEMINI_MODEL_PRIMARY, GEMINI_MODEL_FALLBACK];
+
+  for (const model of modelsToTry) {
+    try {
+      // Rate limit: wait before making the API call
+      await waitForRateLimit();
+
+      const ai = getGenAI();
+      const genModel = ai.getGenerativeModel({
+        model,
+        systemInstruction: systemPrompt,
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 8192,
+          responseMimeType: "application/json",
+        },
+      });
+
+      const result = await Promise.race([
+        genModel.generateContent(truncatedMessage),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("TIMEOUT")), TEXT_TIMEOUT_MS),
+        ),
+      ]);
+
+      const response = result.response;
+      const rawContent = response.text();
+
+      if (!rawContent) {
+        continue; // Try fallback for empty response
+      }
+
+      const data = extractJson<T>(rawContent);
+      console.log(`[Gemini:${options.tool}] Success with model: ${model}`);
+      return { success: true, data, modelUsed: model };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // If model not found → try fallback
+      if (isModelNotFoundError(msg)) {
+        console.warn(
+          `[Gemini:${options.tool}] Model "${model}" not available. Trying fallback "${GEMINI_MODEL_FALLBACK}"...`,
+        );
+        continue;
+      }
+
+      // Timeout, quota, etc. → don't retry, return error immediately
+      return handleApiError(options.tool, msg);
+    }
+  }
+
+  // Both models failed
+  return {
+    success: false,
+    error: `AI model "${GEMINI_MODEL_PRIMARY}" is unavailable and fallback "${GEMINI_MODEL_FALLBACK}" also failed. Check your GEMINI_MODEL_NAME setting.`,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -431,17 +484,6 @@ function handleApiError(
       success: false,
       error:
         "AI rate limit reached (too many requests). Wait 60 seconds and try again.",
-    };
-  }
-
-  // Invalid model
-  if (msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("does not exist")) {
-    console.error(
-      `[Gemini:${tool}] Model "${GEMINI_MODEL}" not found. Check GEMINI_MODEL_NAME env var. Error: ${msg}`,
-    );
-    return {
-      success: false,
-      error: `AI model "${GEMINI_MODEL}" is not available. Check your GEMINI_MODEL_NAME setting.`,
     };
   }
 
