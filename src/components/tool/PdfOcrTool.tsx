@@ -516,7 +516,7 @@ export default function PdfOcrTool() {
                   Gemini AI
                 </Badge>
                 <Badge variant="outline" className="text-xs font-mono">
-                  gemini-3.0-flash
+                  gemini-3-flash-preview
                 </Badge>
               </div>
               <p className="text-sm text-muted-foreground mt-0.5">
@@ -707,7 +707,7 @@ export default function PdfOcrTool() {
                   Gemini AI
                 </Badge>
                 <Badge variant="outline" className="text-xs font-mono">
-                  gemini-3.0-flash
+                  gemini-3-flash-preview
                 </Badge>
                 <Badge variant="outline" className="text-xs gap-1">
                   <Languages className="w-3 h-3" />
