@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Force Node.js runtime — required for Buffer operations
 export const runtime = "nodejs";
@@ -40,24 +41,55 @@ interface GeminiOcrResponse {
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Maximum total size of all images combined (20 MB) */
 const MAX_TOTAL_SIZE = 20 * 1024 * 1024;
-
-/** Timeout for Gemini API call (60 seconds) */
 const GEMINI_TIMEOUT_MS = 60_000;
 
-// Read model and API key from environment
+// Read model and API key from environment — NO hardcoded model names
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-2.0-flash";
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-3.0-flash";
+
+// Rate limit: 3 second delay between API requests (free-tier safety)
+// TODO: Remove this when paid billing is enabled
+const RATE_LIMIT_DELAY_MS = 3000;
+let lastApiCallTime = 0;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rate Limiter
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function waitForRateLimit(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - lastApiCallTime;
+  if (elapsed < RATE_LIMIT_DELAY_MS && lastApiCallTime > 0) {
+    const waitTime = RATE_LIMIT_DELAY_MS - elapsed;
+    console.log(
+      `[GeminiOCR] Rate limit: waiting ${waitTime}ms before next API call...`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, waitTime));
+  }
+  lastApiCallTime = Date.now();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SDK Singleton
+// ─────────────────────────────────────────────────────────────────────────────
+
+let genAI: GoogleGenerativeAI | null = null;
+
+function getGenAI(): GoogleGenerativeAI {
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not configured.");
+  }
+  if (!genAI) {
+    genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  }
+  return genAI;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Build the analysis prompt with the target language interpolated.
- */
 function buildPrompt(language: string): string {
   return `You are an expert document analyzer for PdfCrux. Analyze the provided PDF page images and extract ALL text content with precise layout structure.
 
@@ -89,38 +121,24 @@ Return ONLY valid JSON — no markdown fences, no explanation:
 }`;
 }
 
-/**
- * Attempt to extract valid JSON from Gemini's response text.
- */
 function extractJson(raw: string): GeminiPage[] {
   let text = raw.trim();
-
-  // Strip markdown code fences if present
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) {
-    text = fenceMatch[1].trim();
-  }
+  if (fenceMatch) text = fenceMatch[1].trim();
 
-  // Try direct parse first
   try {
     const parsed = JSON.parse(text);
     return parsed.pages;
   } catch {
-    // Try finding the first { and last } to extract the JSON object
     const firstBrace = text.indexOf("{");
     const lastBrace = text.lastIndexOf("}");
     if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      const candidate = text.substring(firstBrace, lastBrace + 1);
-      const parsed = JSON.parse(candidate);
-      return parsed.pages;
+      return JSON.parse(text.substring(firstBrace, lastBrace + 1)).pages;
     }
     throw new Error("Could not find valid JSON in response");
   }
 }
 
-/**
- * Convert a Blob to base64 string.
- */
 async function blobToBase64(blob: Blob): Promise<string> {
   const buffer = Buffer.from(await blob.arrayBuffer());
   return buffer.toString("base64");
@@ -142,14 +160,12 @@ export async function POST(request: NextRequest) {
           totalBatches: 1,
           error: "AI service not configured. Please set GEMINI_API_KEY.",
         },
-        { status: 500 }
+        { status: 500 },
       );
     }
 
     // ── Step 2: Parse incoming FormData ──
     const form = await request.formData();
-
-    // Extract all image files — client sends them under the "images" key
     const imageFiles = form.getAll("images");
     const language = (form.get("language") as string) || "English";
     const batchIndex = Number(form.get("batchIndex")) || 0;
@@ -165,12 +181,13 @@ export async function POST(request: NextRequest) {
           totalBatches,
           error: "No images provided. Please upload at least one page.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    // Validate every entry is a Blob
-    const blobs = imageFiles.filter((f): f is File | Blob => f instanceof Blob);
+    const blobs = imageFiles.filter(
+      (f): f is File | Blob => f instanceof Blob,
+    );
     if (blobs.length === 0) {
       return NextResponse.json<GeminiOcrResponse>(
         {
@@ -180,11 +197,10 @@ export async function POST(request: NextRequest) {
           totalBatches,
           error: "Invalid image data. Please upload valid image files.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    // Check total file size
     const totalSize = blobs.reduce((sum, b) => sum + b.size, 0);
     if (totalSize > MAX_TOTAL_SIZE) {
       const sizeMB = (totalSize / 1024 / 1024).toFixed(1);
@@ -196,126 +212,147 @@ export async function POST(request: NextRequest) {
           totalBatches,
           error: `Total image size (${sizeMB} MB) exceeds the 20 MB limit. Try fewer pages or lower resolution.`,
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    // ── Step 4: Convert images to base64 ──
-    const imageDataUris: Array<{ inlineData: { mimeType: string; data: string } }> = [];
+    // ── Step 4: Convert images to base64 (sequential, not parallel) ──
+    const imageParts: Array<{
+      inlineData: { mimeType: string; data: string };
+    }> = [];
 
     for (const blob of blobs) {
       const base64 = await blobToBase64(blob);
       const mime = blob.type || "image/jpeg";
-      imageDataUris.push({
-        inlineData: {
-          mimeType: mime,
-          data: base64,
-        },
-      });
+      imageParts.push({ inlineData: { mimeType: mime, data: base64 } });
     }
 
-    // ── Step 5: Build Gemini API request ──
-    const prompt = buildPrompt(language);
-
-    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
-      { text: prompt },
-      ...imageDataUris,
-    ];
-
-    const url = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-    const requestBody = {
-      contents: [
-        {
-          parts,
-        },
-      ],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 16384,
-        responseMimeType: "application/json",
-      },
-    };
-
-    // ── Step 6: Call Gemini API with timeout ──
+    // ── Step 5: Call Gemini via official SDK ──
     let rawResponse: string;
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+      // Rate limit: wait before making the API call
+      await waitForRateLimit();
 
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
+      const ai = getGenAI();
+      const model = ai.getGenerativeModel({
+        model: GEMINI_MODEL,
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 16384,
+          responseMimeType: "application/json",
+        },
       });
 
-      clearTimeout(timeoutId);
+      // Build the prompt + images
+      const prompt = buildPrompt(language);
+      const parts: Array<
+        | { text: string }
+        | { inlineData: { mimeType: string; data: string } }
+      > = [{ text: prompt }, ...imageParts];
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        console.error("[GeminiOCR] API error:", response.status, errorBody);
+      // Call with timeout
+      const result = await Promise.race([
+        model.generateContent(parts),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS),
+        ),
+      ]);
 
-        if (response.status === 403) {
-          return NextResponse.json<GeminiOcrResponse>(
-            { success: false, pages: [], batchIndex, totalBatches, error: "AI API key is invalid or lacks permission." },
-            { status: 502 }
-          );
-        }
-        if (response.status === 429) {
-          return NextResponse.json<GeminiOcrResponse>(
-            { success: false, pages: [], batchIndex, totalBatches, error: "AI rate limit reached. Please wait and try again." },
-            { status: 429 }
-          );
-        }
+      rawResponse = result.response.text();
+
+      if (!rawResponse) {
         return NextResponse.json<GeminiOcrResponse>(
-          { success: false, pages: [], batchIndex, totalBatches, error: `AI service error (${response.status}). Please try again.` },
-          { status: 502 }
-        );
-      }
-
-      const data = await response.json();
-
-      rawResponse = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-
-      if (!rawResponse || typeof rawResponse !== "string") {
-        console.error("[GeminiOCR] Unexpected response shape:", JSON.stringify(data).substring(0, 500));
-        return NextResponse.json<GeminiOcrResponse>(
-          { success: false, pages: [], batchIndex, totalBatches, error: "AI returned an unexpected response format." },
-          { status: 502 }
+          {
+            success: false,
+            pages: [],
+            batchIndex,
+            totalBatches,
+            error: "AI returned an empty response. Please try again.",
+          },
+          { status: 502 },
         );
       }
     } catch (apiErr) {
-      const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+      const msg =
+        apiErr instanceof Error ? apiErr.message : String(apiErr);
       console.error("[GeminiOCR] API call failed:", msg);
 
-      if (msg.includes("abort")) {
+      if (msg === "TIMEOUT" || msg.includes("abort")) {
         return NextResponse.json<GeminiOcrResponse>(
-          { success: false, pages: [], batchIndex, totalBatches, error: "AI processing timed out. Try splitting into smaller batches." },
-          { status: 504 }
+          {
+            success: false,
+            pages: [],
+            batchIndex,
+            totalBatches,
+            error:
+              "AI processing timed out. Try splitting into smaller batches.",
+          },
+          { status: 504 },
+        );
+      }
+
+      if (msg.includes("quota") || msg.includes("429")) {
+        if (msg.includes("limit: 0")) {
+          return NextResponse.json<GeminiOcrResponse>(
+            {
+              success: false,
+              pages: [],
+              batchIndex,
+              totalBatches,
+              error:
+                "Your API key has zero quota. Generate a fresh key at aistudio.google.com.",
+            },
+            { status: 429 },
+          );
+        }
+        return NextResponse.json<GeminiOcrResponse>(
+          {
+            success: false,
+            pages: [],
+            batchIndex,
+            totalBatches,
+            error:
+              "AI rate limit reached. Wait 60 seconds and try again.",
+          },
+          { status: 429 },
         );
       }
 
       return NextResponse.json<GeminiOcrResponse>(
-        { success: false, pages: [], batchIndex, totalBatches, error: "AI service request failed. Please try again." },
-        { status: 502 }
+        {
+          success: false,
+          pages: [],
+          batchIndex,
+          totalBatches,
+          error: "AI service request failed. Please try again.",
+        },
+        { status: 502 },
       );
     }
 
-    // ── Step 7: Parse the JSON response ──
+    // ── Step 6: Parse the JSON response ──
     let pages: GeminiPage[];
     try {
       pages = extractJson(rawResponse);
     } catch (parseErr) {
       console.error("[GeminiOCR] JSON parse failed:", parseErr);
-      console.error("[GeminiOCR] Raw response (first 500 chars):", rawResponse.substring(0, 500));
+      console.error(
+        "[GeminiOCR] Raw response (first 500 chars):",
+        rawResponse.substring(0, 500),
+      );
       return NextResponse.json<GeminiOcrResponse>(
-        { success: false, pages: [], batchIndex, totalBatches, error: "AI returned an invalid response. Please try again." },
-        { status: 502 }
+        {
+          success: false,
+          pages: [],
+          batchIndex,
+          totalBatches,
+          error: "AI returned an invalid response. Please try again.",
+        },
+        { status: 502 },
       );
     }
 
-    // ── Step 8: Return success ──
+    // ── Step 7: Return success ──
     return NextResponse.json<GeminiOcrResponse>({
       success: true,
       pages,
@@ -323,13 +360,20 @@ export async function POST(request: NextRequest) {
       totalBatches,
     });
   } catch (initErr) {
-    // Catch-all: unexpected errors
-    const msg = initErr instanceof Error ? initErr.message : String(initErr);
+    // Catch-all: log clearly, never crash
+    const msg =
+      initErr instanceof Error ? initErr.message : String(initErr);
     console.error("[GeminiOCR] Unhandled error:", msg);
 
     return NextResponse.json<GeminiOcrResponse>(
-      { success: false, pages: [], batchIndex: 0, totalBatches: 1, error: "An unexpected error occurred. Please try again." },
-      { status: 500 }
+      {
+        success: false,
+        pages: [],
+        batchIndex: 0,
+        totalBatches: 1,
+        error: "An unexpected error occurred. Please try again.",
+      },
+      { status: 500 },
     );
   }
 }
