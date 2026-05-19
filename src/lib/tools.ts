@@ -22,6 +22,7 @@ import {
   BookOpen,
   UserCheck,
   FolderArchive,
+  ScanText,
 } from "lucide-react";
 import { type LucideIcon } from "lucide-react";
 
@@ -84,6 +85,17 @@ export const toolCategories: ToolCategory[] = [
         acceptTypes: ".pdf",
         multipleFiles: false,
         maxFileSize: "10MB",
+      },
+      {
+        id: "pdf-ocr",
+        name: "PDF OCR",
+        description: "Extract text from scanned PDFs and images with AI-powered OCR",
+        icon: ScanText,
+        color: "text-orange-600 dark:text-orange-400",
+        bgColor: "bg-orange-50 dark:bg-orange-950/40",
+        acceptTypes: ".pdf",
+        multipleFiles: false,
+        maxFileSize: "20MB",
       },
     ],
   },
