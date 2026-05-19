@@ -44,9 +44,12 @@ interface GeminiOcrResponse {
 const MAX_TOTAL_SIZE = 20 * 1024 * 1024;
 const GEMINI_TIMEOUT_MS = 60_000;
 
-// Read model and API key from environment — NO hardcoded model names
+// Read model and API key from environment
+// Primary: process.env.GEMINI_MODEL_NAME (default: gemini-3-flash-preview)
+// Fallback: gemini-2.5-flash (auto-retry if primary not found)
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-3.0-flash";
+const GEMINI_MODEL_PRIMARY = process.env.GEMINI_MODEL_NAME || "gemini-3-flash-preview";
+const GEMINI_MODEL_FALLBACK = "gemini-2.5-flash";
 
 // Rate limit: 3 second delay between API requests (free-tier safety)
 // TODO: Remove this when paid billing is enabled
@@ -84,6 +87,20 @@ function getGenAI(): GoogleGenerativeAI {
     genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
   }
   return genAI;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model Not-Found Detector
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isModelNotFoundError(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("not found") ||
+    lower.includes("does not exist") ||
+    lower.includes("model not available") ||
+    lower.includes("model does not support")
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,72 +244,71 @@ export async function POST(request: NextRequest) {
       imageParts.push({ inlineData: { mimeType: mime, data: base64 } });
     }
 
-    // ── Step 5: Call Gemini via official SDK ──
-    let rawResponse: string;
-    try {
-      // Rate limit: wait before making the API call
-      await waitForRateLimit();
+    // ── Step 5: Call Gemini via official SDK with model fallback ──
+    const prompt = buildPrompt(language);
+    const parts: Array<
+      | { text: string }
+      | { inlineData: { mimeType: string; data: string } }
+    > = [{ text: prompt }, ...imageParts];
 
-      const ai = getGenAI();
-      const model = ai.getGenerativeModel({
-        model: GEMINI_MODEL,
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 16384,
-          responseMimeType: "application/json",
-        },
-      });
+    const modelsToTry = [GEMINI_MODEL_PRIMARY, GEMINI_MODEL_FALLBACK];
+    let rawResponse: string | null = null;
+    let usedModel = "";
 
-      // Build the prompt + images
-      const prompt = buildPrompt(language);
-      const parts: Array<
-        | { text: string }
-        | { inlineData: { mimeType: string; data: string } }
-      > = [{ text: prompt }, ...imageParts];
+    for (const modelName of modelsToTry) {
+      try {
+        // Rate limit: wait before making the API call
+        await waitForRateLimit();
 
-      // Call with timeout
-      const result = await Promise.race([
-        model.generateContent(parts),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS),
-        ),
-      ]);
-
-      rawResponse = result.response.text();
-
-      if (!rawResponse) {
-        return NextResponse.json<GeminiOcrResponse>(
-          {
-            success: false,
-            pages: [],
-            batchIndex,
-            totalBatches,
-            error: "AI returned an empty response. Please try again.",
+        const ai = getGenAI();
+        const model = ai.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 16384,
+            responseMimeType: "application/json",
           },
-          { status: 502 },
-        );
-      }
-    } catch (apiErr) {
-      const msg =
-        apiErr instanceof Error ? apiErr.message : String(apiErr);
-      console.error("[GeminiOCR] API call failed:", msg);
+        });
 
-      if (msg === "TIMEOUT" || msg.includes("abort")) {
-        return NextResponse.json<GeminiOcrResponse>(
-          {
-            success: false,
-            pages: [],
-            batchIndex,
-            totalBatches,
-            error:
-              "AI processing timed out. Try splitting into smaller batches.",
-          },
-          { status: 504 },
-        );
-      }
+        // Call with timeout
+        const result = await Promise.race([
+          model.generateContent(parts),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS),
+          ),
+        ]);
 
-      if (msg.includes("quota") || msg.includes("429")) {
-        if (msg.includes("limit: 0")) {
+        rawResponse = result.response.text();
+        usedModel = modelName;
+
+        if (!rawResponse) {
+          // Empty response → try next model
+          console.warn(
+            `[GeminiOCR] Model "${modelName}" returned empty response. Trying fallback...`,
+          );
+          continue;
+        }
+
+        // Success!
+        console.log(`[GeminiOCR] Success with model: ${modelName}`);
+        break;
+      } catch (apiErr) {
+        const msg =
+          apiErr instanceof Error ? apiErr.message : String(apiErr);
+        console.error(
+          `[GeminiOCR] Model "${modelName}" failed: ${msg}`,
+        );
+
+        // If model not found → try fallback
+        if (isModelNotFoundError(msg)) {
+          console.warn(
+            `[GeminiOCR] Model "${modelName}" not available. Trying fallback "${GEMINI_MODEL_FALLBACK}"...`,
+          );
+          continue;
+        }
+
+        // Timeout → return error immediately
+        if (msg === "TIMEOUT" || msg.includes("abort")) {
           return NextResponse.json<GeminiOcrResponse>(
             {
               success: false,
@@ -300,31 +316,56 @@ export async function POST(request: NextRequest) {
               batchIndex,
               totalBatches,
               error:
-                "Your API key has zero quota. Generate a fresh key at aistudio.google.com.",
+                "AI processing timed out. Try splitting into smaller batches.",
+            },
+            { status: 504 },
+          );
+        }
+
+        // Quota error → return error immediately
+        if (msg.includes("quota") || msg.includes("429")) {
+          if (msg.includes("limit: 0")) {
+            return NextResponse.json<GeminiOcrResponse>(
+              {
+                success: false,
+                pages: [],
+                batchIndex,
+                totalBatches,
+                error:
+                  "Your API key has zero quota. Generate a fresh key at aistudio.google.com.",
+              },
+              { status: 429 },
+            );
+          }
+          return NextResponse.json<GeminiOcrResponse>(
+            {
+              success: false,
+              pages: [],
+              batchIndex,
+              totalBatches,
+              error:
+                "AI rate limit reached. Wait 60 seconds and try again.",
             },
             { status: 429 },
           );
         }
-        return NextResponse.json<GeminiOcrResponse>(
-          {
-            success: false,
-            pages: [],
-            batchIndex,
-            totalBatches,
-            error:
-              "AI rate limit reached. Wait 60 seconds and try again.",
-          },
-          { status: 429 },
+
+        // Any other error → try fallback
+        console.warn(
+          `[GeminiOCR] Unexpected error with "${modelName}". Trying fallback...`,
         );
       }
+    }
 
+    // If no model worked
+    if (!rawResponse) {
       return NextResponse.json<GeminiOcrResponse>(
         {
           success: false,
           pages: [],
           batchIndex,
           totalBatches,
-          error: "AI service request failed. Please try again.",
+          error: `AI model "${GEMINI_MODEL_PRIMARY}" unavailable and fallback "${GEMINI_MODEL_FALLBACK}" also failed.`,
         },
         { status: 502 },
       );
