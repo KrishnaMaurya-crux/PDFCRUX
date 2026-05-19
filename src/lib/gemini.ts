@@ -2,33 +2,70 @@
  * Shared Gemini AI Engine for PdfCrux
  *
  * Central utility for all Gemini API interactions across PdfCrux AI tools.
- * Uses direct Google REST API — NO external SDK dependencies.
+ * Uses the official @google/generative-ai SDK.
  *
- * Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
- *
- * Model: process.env.GEMINI_MODEL_NAME (default: gemini-2.0-flash)
+ * Model: process.env.GEMINI_MODEL_NAME (default: gemini-3.0-flash)
  * API Key: process.env.GEMINI_API_KEY
  *
  * Two calling modes:
- *  1. callGeminiWithPdf() — Sends PDF file buffer directly to Gemini via inline_data
- *  2. callGemini()        — Text-only prompt → Gemini (fallback / other uses)
+ *  1. callGeminiWithPdf() — Sends PDF file buffer directly via inlineData
+ *  2. callGemini()        — Text-only prompt → Gemini (fallback)
  *
  * Each tool has its own SYSTEM_PROMPT defined here.
  */
+
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-2.0-flash";
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_MODEL = process.env.GEMINI_MODEL_NAME || "gemini-3.0-flash";
 
 const GEMINI_TIMEOUT_MS = 120_000; // 120 seconds for PDF analysis
 const TEXT_TIMEOUT_MS = 90_000; // 90 seconds for text-only analysis
 
 // Maximum PDF size: 20 MB
 const MAX_PDF_SIZE = 20 * 1024 * 1024;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rate Limiter — prevents hitting free-tier limits
+// Ensures at least RATE_LIMIT_DELAY_MS between consecutive API calls.
+// TODO: Remove entire rate limiter when paid billing is enabled.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RATE_LIMIT_DELAY_MS = 3000;
+let lastApiCallTime = 0;
+
+async function waitForRateLimit(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - lastApiCallTime;
+  if (elapsed < RATE_LIMIT_DELAY_MS && lastApiCallTime > 0) {
+    const waitTime = RATE_LIMIT_DELAY_MS - elapsed;
+    console.log(`[Gemini] Rate limit: waiting ${waitTime}ms before next API call...`);
+    await new Promise((resolve) => setTimeout(resolve, waitTime));
+  }
+  lastApiCallTime = Date.now();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SDK Singleton — lazily initialized, reused across calls
+// ─────────────────────────────────────────────────────────────────────────────
+
+let genAI: GoogleGenerativeAI | null = null;
+
+function getGenAI(): GoogleGenerativeAI {
+  if (!GEMINI_API_KEY) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured. Set it in your environment variables.",
+    );
+  }
+  if (!genAI) {
+    genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  }
+  return genAI;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // System Prompts — One per tool
@@ -192,93 +229,12 @@ export interface GeminiResponse<T = unknown> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Core: Call Gemini REST API directly (no SDK)
+// Core: Send PDF directly to Gemini via inlineData (official SDK)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Call the Gemini API using direct REST fetch.
- * Supports both PDF (inline_data) and text-only prompts.
- */
-async function callGeminiApi(
-  systemPrompt: string,
-  userParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }>,
-  timeoutMs: number,
-): Promise<string> {
-  // Validate API key
-  if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is not configured. Please set the environment variable.");
-  }
-
-  const url = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-  const body = {
-    systemInstruction: {
-      parts: [{ text: systemPrompt }],
-    },
-    contents: [
-      {
-        parts: userParts,
-      },
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 8192,
-      responseMimeType: "application/json",
-    },
-  };
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("[Gemini] API error:", response.status, errorBody);
-
-      if (response.status === 400) {
-        throw new Error("Invalid request to AI service. The PDF may be corrupted or empty.");
-      }
-      if (response.status === 403) {
-        throw new Error("AI API key is invalid or does not have access to this model.");
-      }
-      if (response.status === 429) {
-        throw new Error("AI rate limit reached. Please wait a moment and try again.");
-      }
-      if (response.status === 503) {
-        throw new Error("AI service is temporarily unavailable. Please try again in a few seconds.");
-      }
-      throw new Error(`AI service returned error ${response.status}. Please try again.`);
-    }
-
-    const data = await response.json();
-
-    // Extract text from Gemini response
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text || typeof text !== "string") {
-      console.error("[Gemini] Unexpected response:", JSON.stringify(data)?.substring(0, 500));
-      throw new Error("AI returned an unexpected response format.");
-    }
-
-    return text;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Core: Send PDF directly to Gemini via inline_data
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Send a PDF file directly to Gemini via inline_data.
- * Gemini natively reads PDF files — NO image conversion needed.
+ * Send a PDF file directly to Gemini via the official SDK.
+ * Uses inlineData — Gemini natively reads PDF files. NO image conversion needed.
  */
 export async function callGeminiWithPdf<T = unknown>(
   options: GeminiPdfOptions,
@@ -295,9 +251,6 @@ export async function callGeminiWithPdf<T = unknown>(
 
     const systemPrompt = SYSTEM_PROMPTS[options.tool];
 
-    // Convert PDF buffer to base64
-    const base64 = Buffer.from(options.pdfBuffer).toString("base64");
-
     // Build user message text
     let userText: string;
     if (options.tool === "resume" && options.extraContext) {
@@ -305,63 +258,60 @@ export async function callGeminiWithPdf<T = unknown>(
     } else if (options.tool === "ocr" && options.extraContext) {
       userText = `Analyze the PDF document below. The document language is: ${options.extraContext}. Extract ALL text and structure from every page.`;
     } else {
-      userText = "Analyze the PDF document below and follow the instructions in your system prompt.";
+      userText =
+        "Analyze the PDF document below and follow the instructions in your system prompt.";
     }
 
-    // Build parts: text prompt + PDF inline_data
-    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
-      { text: userText },
-      {
-        inlineData: {
-          mimeType: "application/pdf",
-          data: base64,
-        },
-      },
-    ];
+    // Rate limit: wait before making the API call
+    await waitForRateLimit();
 
-    // Call Gemini API
-    const rawContent = await callGeminiApi(systemPrompt, parts, GEMINI_TIMEOUT_MS);
+    // Initialize SDK and get model
+    const ai = getGenAI();
+    const model = ai.getGenerativeModel({
+      model: GEMINI_MODEL,
+      systemInstruction: systemPrompt,
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 8192,
+        responseMimeType: "application/json",
+      },
+    });
+
+    // Convert PDF buffer to base64
+    const base64 = Buffer.from(options.pdfBuffer).toString("base64");
+
+    // Send PDF with text prompt
+    const result = await Promise.race([
+      model.generateContent([
+        { text: userText },
+        {
+          inlineData: {
+            mimeType: "application/pdf",
+            data: base64,
+          },
+        },
+      ]),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("TIMEOUT")), GEMINI_TIMEOUT_MS),
+      ),
+    ]);
+
+    const response = result.response;
+    const rawContent = response.text();
+
+    if (!rawContent) {
+      return {
+        success: false,
+        error: "AI returned an empty response. Please try again.",
+      };
+    }
 
     // Parse JSON from response
     const data = extractJson<T>(rawContent);
     return { success: true, data };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-
-    if (msg === "TIMEOUT" || msg.includes("abort")) {
-      return {
-        success: false,
-        error:
-          "AI processing timed out. The document may be too large. Try a smaller PDF.",
-      };
-    }
-
-    if (
-      msg.toLowerCase().includes("api key") ||
-      msg.toLowerCase().includes("not configured") ||
-      msg.toLowerCase().includes("invalid")
-    ) {
-      return {
-        success: false,
-        error: "AI service not configured. Please set the GEMINI_API_KEY.",
-      };
-    }
-
-    if (
-      msg.toLowerCase().includes("rate limit") ||
-      msg.toLowerCase().includes("quota")
-    ) {
-      return {
-        success: false,
-        error: "AI rate limit reached. Please wait a moment and try again.",
-      };
-    }
-
-    console.error(`[Gemini:${options.tool}] PDF API call failed:`, msg);
-    return {
-      success: false,
-      error: "AI service request failed. Please try again.",
-    };
+    return handleApiError(options.tool, msg);
   }
 }
 
@@ -370,7 +320,7 @@ export async function callGeminiWithPdf<T = unknown>(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Send a text analysis request to Gemini.
+ * Send a text analysis request to Gemini via the official SDK.
  * Used as fallback when PDF buffer is not available.
  */
 export async function callGemini<T = unknown>(
@@ -394,40 +344,113 @@ export async function callGemini<T = unknown>(
           "\n\n[... Document truncated due to length. Analyze the above content.]"
         : userMessage;
 
-    const parts: Array<{ text: string }> = [{ text: truncatedMessage }];
+    // Rate limit: wait before making the API call
+    await waitForRateLimit();
 
-    const rawContent = await callGeminiApi(systemPrompt, parts, TEXT_TIMEOUT_MS);
+    // Initialize SDK and get model
+    const ai = getGenAI();
+    const model = ai.getGenerativeModel({
+      model: GEMINI_MODEL,
+      systemInstruction: systemPrompt,
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 8192,
+        responseMimeType: "application/json",
+      },
+    });
+
+    const result = await Promise.race([
+      model.generateContent(truncatedMessage),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("TIMEOUT")), TEXT_TIMEOUT_MS),
+      ),
+    ]);
+
+    const response = result.response;
+    const rawContent = response.text();
+
+    if (!rawContent) {
+      return {
+        success: false,
+        error: "AI returned an empty response. Please try again.",
+      };
+    }
 
     const data = extractJson<T>(rawContent);
     return { success: true, data };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    return handleApiError(options.tool, msg);
+  }
+}
 
-    if (msg === "TIMEOUT" || msg.includes("abort")) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Error Handler — logs clearly, never crashes
+// ─────────────────────────────────────────────────────────────────────────────
+
+function handleApiError(
+  tool: string,
+  msg: string,
+): GeminiResponse<never> {
+  // Timeout
+  if (msg === "TIMEOUT" || msg.includes("abort")) {
+    return {
+      success: false,
+      error:
+        "AI processing timed out. The document may be too large or complex. Try a smaller PDF.",
+    };
+  }
+
+  // Missing API key
+  if (
+    msg.toLowerCase().includes("api_key") ||
+    msg.toLowerCase().includes("not configured") ||
+    msg.toLowerCase().includes("api key")
+  ) {
+    return {
+      success: false,
+      error:
+        "AI service not configured. Please set the GEMINI_API_KEY environment variable.",
+    };
+  }
+
+  // Zero quota — specific helpful message
+  if (msg.includes("quota") || msg.includes("429")) {
+    if (msg.includes("limit: 0") || msg.includes("ZERO_RESULTS")) {
+      console.error(
+        `[Gemini:${tool}] API key has zero quota. Generate a fresh key at aistudio.google.com`,
+      );
       return {
         success: false,
         error:
-          "AI processing timed out. The document may be too complex. Please try again.",
+          "Your API key has zero quota. Generate a fresh key at aistudio.google.com → paste in GEMINI_API_KEY.",
       };
     }
-
-    if (
-      msg.toLowerCase().includes("api key") ||
-      msg.toLowerCase().includes("not configured") ||
-      msg.toLowerCase().includes("invalid")
-    ) {
-      return {
-        success: false,
-        error: "AI service not configured. Please set the GEMINI_API_KEY.",
-      };
-    }
-
-    console.error(`[Gemini:${options.tool}] Text API call failed:`, msg);
+    console.error(`[Gemini:${tool}] Rate limit hit: ${msg}`);
     return {
       success: false,
-      error: "AI service request failed. Please try again.",
+      error:
+        "AI rate limit reached (too many requests). Wait 60 seconds and try again.",
     };
   }
+
+  // Invalid model
+  if (msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("does not exist")) {
+    console.error(
+      `[Gemini:${tool}] Model "${GEMINI_MODEL}" not found. Check GEMINI_MODEL_NAME env var. Error: ${msg}`,
+    );
+    return {
+      success: false,
+      error: `AI model "${GEMINI_MODEL}" is not available. Check your GEMINI_MODEL_NAME setting.`,
+    };
+  }
+
+  // Generic error — log it, don't crash
+  console.error(`[Gemini:${tool}] API call failed:`, msg);
+  return {
+    success: false,
+    error: "AI service request failed. Please try again.",
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
