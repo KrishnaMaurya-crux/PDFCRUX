@@ -3,6 +3,10 @@
  *
  * Uses the API routes for server-side persistence.
  * Falls back gracefully if the user is not authenticated.
+ *
+ * Key insight: The backend returns { history: [...] } wrapped in an object.
+ * getHistory() returns { entries, authenticated } so the UI can distinguish
+ * between "user not logged in" and "user has no history".
  */
 
 export interface HistoryEntry {
@@ -17,15 +21,23 @@ export interface HistoryEntry {
   createdAt: string;
 }
 
+/** Result type that distinguishes auth failure from empty history. */
+export interface HistoryResult {
+  entries: HistoryEntry[];
+  authenticated: boolean;
+}
+
 /** Tool metadata for display purposes. */
 const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }> = {
   "pdf-summary": { color: "text-amber-600", bgColor: "bg-amber-50", icon: "✨" },
   "pdf-notes": { color: "text-emerald-600", bgColor: "bg-emerald-50", icon: "📝" },
   "resume-checker": { color: "text-blue-600", bgColor: "bg-blue-50", icon: "📋" },
+  "pdf-ocr": { color: "text-purple-600", bgColor: "bg-purple-50", icon: "🔍" },
 };
 
 /**
  * Save a tool usage entry to history.
+ * Silently fails if not authenticated — history is non-critical.
  */
 export async function saveHistory(params: {
   toolId: string;
@@ -38,6 +50,7 @@ export async function saveHistory(params: {
     const res = await fetch("/api/history", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify(params),
     });
     return res.ok;
@@ -49,15 +62,36 @@ export async function saveHistory(params: {
 
 /**
  * Get all history entries for the current user.
+ *
+ * Returns { entries, authenticated } so the UI can:
+ *  - Show a "Please log in" message when authenticated === false
+ *  - Show an empty state when authenticated === true && entries.length === 0
+ *  - Show the history list when entries.length > 0
  */
-export async function getHistory(): Promise<HistoryEntry[]> {
+export async function getHistory(): Promise<HistoryResult> {
   try {
-    const res = await fetch("/api/history");
-    if (!res.ok) return [];
+    const res = await fetch("/api/history", {
+      credentials: "include",
+    });
+
+    // 401 = user is not logged in
+    if (res.status === 401) {
+      return { entries: [], authenticated: false };
+    }
+
+    // Other non-ok responses (503, 500, etc.)
+    if (!res.ok) {
+      return { entries: [], authenticated: true };
+    }
+
     const data = await res.json();
-    return data.history || [];
+    return {
+      entries: data.history || [],
+      authenticated: true,
+    };
   } catch {
-    return [];
+    // Network error — treat as authenticated but empty
+    return { entries: [], authenticated: true };
   }
 }
 
@@ -68,6 +102,7 @@ export async function deleteHistoryItem(id: string): Promise<boolean> {
   try {
     const res = await fetch(`/api/history?id=${encodeURIComponent(id)}`, {
       method: "DELETE",
+      credentials: "include",
     });
     return res.ok;
   } catch {
@@ -83,6 +118,7 @@ export async function markDownloaded(id: string): Promise<boolean> {
     const res = await fetch("/api/history", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ id, downloaded: true }),
     });
     return res.ok;
