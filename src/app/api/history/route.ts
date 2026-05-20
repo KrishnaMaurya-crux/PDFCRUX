@@ -3,170 +3,187 @@ import { db } from "@/lib/db";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// CRITICAL: Force Node.js runtime!
+// Without this, Vercel runs as Edge Function → Supabase + Prisma crash = 500
+// ─────────────────────────────────────────────────────────────────────────────
+export const runtime = "nodejs";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth: Extract user from Authorization header
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Extract and verify user from Authorization header.
- * Supabase session lives in browser localStorage, so we rely on
- * the client sending `Authorization: Bearer <access_token>`.
- */
-async function getUserFromRequest(req: Request) {
+async function getUserFromRequest(req: Request): Promise<{
+  success: true;
+  user: { id: string; email: string; user_metadata?: Record<string, unknown> };
+} | { success: false; reason: string }> {
+  // ── Guard 1: Check header exists ──
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) {
+    console.log("[History:Auth] ❌ AUTH FAIL — No Authorization header");
+    return { success: false, reason: "No Authorization header" };
+  }
+
+  // ── Guard 2: Check Bearer prefix ──
+  if (!authHeader.startsWith("Bearer ")) {
+    console.log("[History:Auth] ❌ AUTH FAIL — Header not Bearer format");
+    return { success: false, reason: "Invalid Authorization format (expected Bearer)" };
+  }
+
+  // ── Guard 3: Extract token ──
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length < 10) {
+    console.log("[History:Auth] ❌ AUTH FAIL — Token too short or empty");
+    return { success: false, reason: "Invalid or empty token" };
+  }
+
+  console.log("[History:Auth] Step 1: Token extracted (length:", token.length + ")");
+
+  // ── Guard 4: Verify token with Supabase ──
   try {
-    console.log("[History] Step 1: Reading Authorization header...");
-    const authHeader = req.headers.get("Authorization");
-
-    if (!authHeader) {
-      console.log("[History] ❌ No Authorization header found");
-      return null;
-    }
-
-    if (!authHeader.startsWith("Bearer ")) {
-      console.log("[History] ❌ Authorization header does NOT start with 'Bearer'");
-      return null;
-    }
-
-    const token = authHeader.slice(7);
-    console.log("[History] Step 2: Token extracted, length:", token.length);
-
-    console.log("[History] Step 3: Calling supabase.auth.getUser()...");
+    console.log("[History:Auth] Step 2: Calling supabase.auth.getUser()...");
     const { data, error } = await supabase.auth.getUser(token);
 
     if (error) {
-      console.error("[History] ❌ supabase.auth.getUser() error:", error.message);
-      return null;
+      console.error("[History:Auth] ❌ AUTH FAIL — supabase.getUser() error:", error.message);
+      return { success: false, reason: `Supabase error: ${error.message}` };
     }
 
     if (!data.user) {
-      console.log("[History] ❌ supabase.auth.getUser() returned no user");
-      return null;
+      console.log("[History:Auth] ❌ AUTH FAIL — No user returned from Supabase");
+      return { success: false, reason: "Token valid but no user found" };
     }
 
-    console.log("[History] ✅ User authenticated:", {
-      id: data.user.id,
-      email: data.user.email,
-    });
-
-    return data.user;
+    console.log("[History:Auth] ✅ AUTH SUCCESS — user:", data.user.email);
+    return { success: true, user: data.user };
   } catch (err) {
-    console.error("[History] 💥 getUserFromRequest() CRASHED:", err);
-    return null;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[History:Auth] 💥 AUTH CRASH:", msg);
+    return { success: false, reason: `Auth crash: ${msg}` };
   }
 }
 
-/**
- * Find or create a local User record for the Supabase user.
- */
-async function findOrCreateUser(supabaseUser: { email: string; user_metadata?: Record<string, unknown> }) {
-  try {
-    const email = supabaseUser.email;
-    console.log("[History] Step 4: Looking up local user for email:", email);
+// ─────────────────────────────────────────────────────────────────────────────
+// Database: Find or create local user
+// ─────────────────────────────────────────────────────────────────────────────
 
+async function findOrCreateUser(supabaseUser: {
+  id: string;
+  email: string;
+  user_metadata?: Record<string, unknown>;
+}) {
+  const email = supabaseUser.email;
+  if (!email) {
+    throw new Error("Supabase user has no email — cannot create local user");
+  }
+
+  console.log("[History:DB] Step 3: Looking up local user:", email);
+
+  try {
     let user = await db.user.findUnique({ where: { email } });
 
     if (user) {
-      console.log("[History] ✅ Existing local user found:", { id: user.id, email: user.email });
+      console.log("[History:DB] ✅ Existing user found:", user.id);
       return user;
     }
 
-    console.log("[History] Step 5: No local user found. Creating new user...");
-    const name = (supabaseUser.user_metadata?.full_name as string) || email.split("@")[0];
-    user = await db.user.create({
-      data: { email, name },
-    });
+    // Create new user — handle missing metadata gracefully
+    const name =
+      (supabaseUser.user_metadata?.full_name as string) ||
+      (supabaseUser.user_metadata?.name as string) ||
+      email.split("@")[0] ||
+      "Unknown";
 
-    console.log("[History] ✅ New local user created:", { id: user.id, email: user.email });
+    console.log("[History:DB] Step 4: Creating new local user...");
+    user = await db.user.create({ data: { email, name } });
+
+    console.log("[History:DB] ✅ New user created:", user.id);
     return user;
   } catch (err) {
-    console.error("[History] 💥 findOrCreateUser() CRASHED:", err);
-    throw err; // Re-throw so caller's catch can handle it
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[History:DB] 💥 DATABASE CRASH in findOrCreateUser():", msg);
+    throw new Error(`Database error: ${msg}`);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/history — fetch user's history
+// GET /api/history
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
-  console.log("[History] ═══ GET /api/history START ═══");
+  console.log("[History] ══════ GET /api/history START ══════");
 
-  // ── Guard: Supabase not configured ──
+  // ── Guard: Supabase env vars ──
   if (!isSupabaseConfigured) {
-    console.log("[History] ❌ Supabase not configured (missing URL or ANON_KEY)");
-    return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
+    console.log("[History] ❌ Supabase not configured (env vars missing)");
+    return NextResponse.json(
+      { error: "Authentication not configured" },
+      { status: 503 }
+    );
   }
 
+  // ── Step 1-2: Authenticate (NEVER touches DB) ──
+  const authResult = await getUserFromRequest(req);
+  if (!authResult.success) {
+    console.log("[History] ══════ GET → 401 (Auth Fail) ══════");
+    return NextResponse.json({ error: "Unauthorized", reason: authResult.reason }, { status: 401 });
+  }
+
+  // ── Step 3-4: Database operations (ONLY reached if auth passed) ──
   try {
-    // ── Step 1-3: Authenticate user ──
-    const supabaseUser = await getUserFromRequest(req);
-    if (!supabaseUser) {
-      console.log("[History] ═══ GET /api/history END → 401 ═══");
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const user = await findOrCreateUser(authResult.user);
 
-    // ── Step 4-5: Find or create local user ──
-    const user = await findOrCreateUser(supabaseUser);
-
-    // ── Step 6: Fetch history ──
-    console.log("[History] Step 6: Fetching history for user:", user.id);
+    console.log("[History] Step 5: Fetching history for user:", user.id);
     const history = await db.history.findMany({
       where: { userId: user.id },
       orderBy: { createdAt: "desc" },
       take: 100,
     });
 
-    console.log("[History] ✅ Fetched", history.length, "history entries");
-    console.log("[History] ═══ GET /api/history END → 200 ═══");
-
+    console.log("[History] ✅ GET → 200 (", history.length, "entries)");
     return NextResponse.json({ history });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const stack = error instanceof Error ? error.stack : "No stack trace";
-    console.error("[History] 💥 GET /api/history CRASH:", message);
-    console.error("[History] Stack:", stack);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[History] 💥 GET → 500 (Database Crash):", msg);
 
     return NextResponse.json(
-      { error: "Failed to fetch history", debug: message },
+      { error: "Failed to fetch history", debug: msg },
       { status: 500 }
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/history — save a new history entry
+// POST /api/history
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
-  console.log("[History] ═══ POST /api/history START ═══");
+  console.log("[History] ══════ POST /api/history START ══════");
 
   if (!isSupabaseConfigured) {
-    console.log("[History] ❌ Supabase not configured");
     return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
   }
 
+  // ── Auth first ──
+  const authResult = await getUserFromRequest(req);
+  if (!authResult.success) {
+    console.log("[History] ══════ POST → 401 (Auth Fail) ══════");
+    return NextResponse.json({ error: "Unauthorized", reason: authResult.reason }, { status: 401 });
+  }
+
+  // ── Database operations ──
   try {
-    // ── Authenticate ──
-    const supabaseUser = await getUserFromRequest(req);
-    if (!supabaseUser) {
-      console.log("[History] ═══ POST /api/history END → 401 ═══");
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const user = await findOrCreateUser(authResult.user);
 
-    // ── Find or create user ──
-    const user = await findOrCreateUser(supabaseUser);
-
-    // ── Parse body ──
-    console.log("[History] Step 6: Parsing request body...");
+    // Parse body
+    console.log("[History] Step 5: Parsing request body...");
     const body = await req.json();
     const { toolId, toolName, fileName, fileSize, resultSummary } = body;
 
     if (!toolId || !toolName || !fileName) {
-      console.log("[History] ❌ Missing required fields:", { toolId, toolName, fileName });
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    // ── Save to database ──
-    console.log("[History] Step 7: Saving history entry:", { toolId, fileName });
+    console.log("[History] Step 6: Saving history entry...");
     const entry = await db.history.create({
       data: {
         userId: user.id,
@@ -178,39 +195,37 @@ export async function POST(req: Request) {
       },
     });
 
-    console.log("[History] ✅ History saved:", { id: entry.id, toolId });
-    console.log("[History] ═══ POST /api/history END → 200 ═══");
-
+    console.log("[History] ✅ POST → 200 (entry:", entry.id + ")");
     return NextResponse.json({ entry });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const stack = error instanceof Error ? error.stack : "No stack trace";
-    console.error("[History] 💥 POST /api/history CRASH:", message);
-    console.error("[History] Stack:", stack);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[History] 💥 POST → 500 (Database Crash):", msg);
 
     return NextResponse.json(
-      { error: "Failed to save history", debug: message },
+      { error: "Failed to save history", debug: msg },
       { status: 500 }
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/history?id=xxx — delete a history entry
+// DELETE /api/history?id=xxx
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function DELETE(req: Request) {
-  console.log("[History] ═══ DELETE /api/history START ═══");
+  console.log("[History] ══════ DELETE /api/history START ══════");
 
   if (!isSupabaseConfigured) {
     return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
   }
 
+  const authResult = await getUserFromRequest(req);
+  if (!authResult.success) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
-    const supabaseUser = await getUserFromRequest(req);
-    if (!supabaseUser) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const user = await findOrCreateUser(authResult.user);
 
     const url = new URL(req.url);
     const id = url.searchParams.get("id");
@@ -218,44 +233,41 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: "Missing id parameter" }, { status: 400 });
     }
 
-    console.log("[History] Deleting entry:", id);
-    const user = await findOrCreateUser(supabaseUser);
     const entry = await db.history.findFirst({ where: { id, userId: user.id } });
     if (!entry) {
       return NextResponse.json({ error: "Entry not found" }, { status: 404 });
     }
 
     await db.history.delete({ where: { id } });
-    console.log("[History] ✅ Entry deleted:", id);
+    console.log("[History] ✅ DELETE → 200");
 
     return NextResponse.json({ success: true });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("[History] 💥 DELETE /api/history CRASH:", message);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[History] 💥 DELETE → 500:", msg);
 
-    return NextResponse.json(
-      { error: "Failed to delete history", debug: message },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to delete history", debug: msg }, { status: 500 });
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PATCH /api/history — update a history entry (e.g., mark as downloaded)
+// PATCH /api/history
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function PATCH(req: Request) {
-  console.log("[History] ═══ PATCH /api/history START ═══");
+  console.log("[History] ══════ PATCH /api/history START ══════");
 
   if (!isSupabaseConfigured) {
     return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
   }
 
+  const authResult = await getUserFromRequest(req);
+  if (!authResult.success) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
-    const supabaseUser = await getUserFromRequest(req);
-    if (!supabaseUser) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const user = await findOrCreateUser(authResult.user);
 
     const body = await req.json();
     const { id, downloaded } = body;
@@ -263,8 +275,6 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "Missing id" }, { status: 400 });
     }
 
-    console.log("[History] Patching entry:", id);
-    const user = await findOrCreateUser(supabaseUser);
     const entry = await db.history.findFirst({ where: { id, userId: user.id } });
     if (!entry) {
       return NextResponse.json({ error: "Entry not found" }, { status: 404 });
@@ -276,13 +286,10 @@ export async function PATCH(req: Request) {
     });
 
     return NextResponse.json({ entry: updated });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("[History] 💥 PATCH /api/history CRASH:", message);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[History] 💥 PATCH → 500:", msg);
 
-    return NextResponse.json(
-      { error: "Failed to update history", debug: message },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to update history", debug: msg }, { status: 500 });
   }
 }
