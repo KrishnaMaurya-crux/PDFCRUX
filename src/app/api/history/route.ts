@@ -1,121 +1,58 @@
 import { NextResponse } from "next/server";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { db } from "@/lib/db";
-import { isSupabaseConfigured } from "@/lib/supabase";
-import type { User } from "@supabase/supabase-js";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 
-// Force Node.js runtime — required for database access
-export const runtime = "nodejs";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Auth Strategy: Bearer Token via Authorization Header
-//
-// PROBLEM: Supabase JS client stores session in localStorage (browser).
-// The server has NO access to localStorage or cookies for Supabase sessions.
-// So supabase.auth.getSession() ALWAYS returns null on the server → 401.
-//
-// SOLUTION: Client sends access_token in Authorization: Bearer <token> header.
-// Server uses supabase.auth.getUser(token) to verify the token and get user info.
-// This is the official Supabase recommendation for Next.js Route Handlers.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function createServerSupabase(): SupabaseClient | null {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseAnonKey) return null;
-  return createClient(supabaseUrl, supabaseAnonKey);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Auth Helper — verify Bearer token, return Supabase user or error
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface AuthResult {
-  user: User | null;
-  localUserId: string | null;
-  error: "not_configured" | "no_token" | "invalid_token" | null;
-}
-
-async function authenticateRequest(req: Request): Promise<AuthResult> {
-  if (!isSupabaseConfigured) {
-    return { user: null, localUserId: null, error: "not_configured" };
-  }
-
-  // 1. Extract Bearer token from Authorization header
+/**
+ * Extract and verify user from Authorization header.
+ * Supabase session lives in browser localStorage, so we rely on
+ * the client sending `Authorization: Bearer <access_token>`.
+ */
+async function getUserFromRequest(req: Request) {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return { user: null, localUserId: null, error: "no_token" };
+    return null;
   }
 
-  const token = authHeader.substring(7).trim();
-  if (!token) {
-    return { user: null, localUserId: null, error: "no_token" };
-  }
-
-  // 2. Verify the token with Supabase
-  const serverSupabase = createServerSupabase();
-  if (!serverSupabase) {
-    return { user: null, localUserId: null, error: "not_configured" };
-  }
-
-  const {
-    data: { user },
-    error,
-  } = await serverSupabase.auth.getUser(token);
-
+  const token = authHeader.slice(7);
+  const { data: { user }, error } = await supabase.auth.getUser(token);
   if (error || !user) {
-    console.warn("[History Auth] Token verification failed:", error?.message);
-    return { user: null, localUserId: null, error: "invalid_token" };
+    return null;
   }
+  return user;
+}
 
-  // 3. Find or create local user in SQLite
-  const email = user.email;
-  if (!email) {
-    return { user: null, localUserId: null, error: "invalid_token" };
-  }
-
-  let localUser = await db.user.findUnique({ where: { email } });
-  if (!localUser) {
-    localUser = await db.user.create({
+/**
+ * Find or create a local User record for the Supabase user.
+ */
+async function findOrCreateUser(supabaseUser: { email: string; user_metadata?: Record<string, unknown> }) {
+  const email = supabaseUser.email;
+  let user = await db.user.findUnique({ where: { email } });
+  if (!user) {
+    user = await db.user.create({
       data: {
         email,
-        name:
-          user.user_metadata?.full_name ||
-          user.user_metadata?.name ||
-          email.split("@")[0],
-        image: user.user_metadata?.avatar_url || null,
+        name: (supabaseUser.user_metadata?.full_name as string) || email.split("@")[0],
       },
     });
   }
-
-  return { user, localUserId: localUser.id, error: null };
+  return user;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/history — fetch user's history
-// ─────────────────────────────────────────────────────────────────────────────
-
 export async function GET(req: Request) {
+  if (!isSupabaseConfigured) {
+    return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
+  }
   try {
-    const { localUserId, error: authError } = await authenticateRequest(req);
-
-    if (authError === "not_configured") {
-      return NextResponse.json(
-        { error: "Authentication not configured", history: [] },
-        { status: 503 },
-      );
+    const supabaseUser = await getUserFromRequest(req);
+    if (!supabaseUser) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (authError) {
-      return NextResponse.json(
-        { error: "Unauthorized", history: [] },
-        { status: 401 },
-      );
-    }
+    const user = await findOrCreateUser(supabaseUser);
 
     const history = await db.history.findMany({
-      where: { userId: localUserId! },
+      where: { userId: user.id },
       orderBy: { createdAt: "desc" },
       take: 100,
     });
@@ -123,45 +60,33 @@ export async function GET(req: Request) {
     return NextResponse.json({ history });
   } catch (error) {
     console.error("[GET /api/history]", error);
-    return NextResponse.json(
-      { error: "Failed to fetch history", history: [] },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Failed to fetch history" }, { status: 500 });
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/history — save a new history entry
-// ─────────────────────────────────────────────────────────────────────────────
-
 export async function POST(req: Request) {
+  if (!isSupabaseConfigured) {
+    return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
+  }
   try {
-    const { localUserId, error: authError } = await authenticateRequest(req);
-
-    if (authError === "not_configured") {
-      return NextResponse.json(
-        { error: "Authentication not configured" },
-        { status: 503 },
-      );
-    }
-
-    if (authError) {
+    const supabaseUser = await getUserFromRequest(req);
+    if (!supabaseUser) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    const user = await findOrCreateUser(supabaseUser);
 
     const body = await req.json();
     const { toolId, toolName, fileName, fileSize, resultSummary } = body;
 
     if (!toolId || !toolName || !fileName) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
     const entry = await db.history.create({
       data: {
-        userId: localUserId!,
+        userId: user.id,
         toolId,
         toolName,
         fileName,
@@ -173,45 +98,30 @@ export async function POST(req: Request) {
     return NextResponse.json({ entry });
   } catch (error) {
     console.error("[POST /api/history]", error);
-    return NextResponse.json(
-      { error: "Failed to save history" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Failed to save history" }, { status: 500 });
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/history?id=xxx — delete a history entry
-// ─────────────────────────────────────────────────────────────────────────────
-
 export async function DELETE(req: Request) {
+  if (!isSupabaseConfigured) {
+    return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
+  }
   try {
-    const { localUserId, error: authError } = await authenticateRequest(req);
-
-    if (authError === "not_configured") {
-      return NextResponse.json(
-        { error: "Authentication not configured" },
-        { status: 503 },
-      );
-    }
-
-    if (authError) {
+    const supabaseUser = await getUserFromRequest(req);
+    if (!supabaseUser) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const url = new URL(req.url);
     const id = url.searchParams.get("id");
     if (!id) {
-      return NextResponse.json(
-        { error: "Missing id parameter" },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "Missing id parameter" }, { status: 400 });
     }
 
     // Verify ownership
-    const entry = await db.history.findFirst({
-      where: { id, userId: localUserId! },
-    });
+    const user = await findOrCreateUser(supabaseUser);
+    const entry = await db.history.findFirst({ where: { id, userId: user.id } });
     if (!entry) {
       return NextResponse.json({ error: "Entry not found" }, { status: 404 });
     }
@@ -221,29 +131,18 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("[DELETE /api/history]", error);
-    return NextResponse.json(
-      { error: "Failed to delete history" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Failed to delete history" }, { status: 500 });
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/history — update a history entry (e.g., mark as downloaded)
-// ─────────────────────────────────────────────────────────────────────────────
-
 export async function PATCH(req: Request) {
+  if (!isSupabaseConfigured) {
+    return NextResponse.json({ error: "Authentication not configured" }, { status: 503 });
+  }
   try {
-    const { localUserId, error: authError } = await authenticateRequest(req);
-
-    if (authError === "not_configured") {
-      return NextResponse.json(
-        { error: "Authentication not configured" },
-        { status: 503 },
-      );
-    }
-
-    if (authError) {
+    const supabaseUser = await getUserFromRequest(req);
+    if (!supabaseUser) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -253,10 +152,8 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "Missing id" }, { status: 400 });
     }
 
-    // Verify ownership
-    const entry = await db.history.findFirst({
-      where: { id, userId: localUserId! },
-    });
+    const user = await findOrCreateUser(supabaseUser);
+    const entry = await db.history.findFirst({ where: { id, userId: user.id } });
     if (!entry) {
       return NextResponse.json({ error: "Entry not found" }, { status: 404 });
     }
@@ -269,9 +166,6 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ entry: updated });
   } catch (error) {
     console.error("[PATCH /api/history]", error);
-    return NextResponse.json(
-      { error: "Failed to update history" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Failed to update history" }, { status: 500 });
   }
 }
