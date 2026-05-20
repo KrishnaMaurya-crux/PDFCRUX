@@ -23,24 +23,32 @@ export interface HistoryEntry {
 const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }> = {
   "pdf-summary": { color: "text-amber-600", bgColor: "bg-amber-50", icon: "✨" },
   "pdf-notes": { color: "text-emerald-600", bgColor: "bg-emerald-50", icon: "📝" },
+  "pdf-ocr": { color: "text-violet-600", bgColor: "bg-violet-50", icon: "🔍" },
   "resume-checker": { color: "text-blue-600", bgColor: "bg-blue-50", icon: "📋" },
 };
 
-/**
- * Get auth headers from Supabase session (stored in localStorage).
- * Returns empty headers if not authenticated.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth: Get Bearer token from Supabase session (localStorage)
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function getAuthHeaders(): Promise<Record<string, string>> {
   try {
-    const { data: { session } } = await supabase.auth.getSession();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
     if (session?.access_token) {
       return { Authorization: `Bearer ${session.access_token}` };
     }
-  } catch {
-    // Silently fail
+    console.log("[History:Client] No active session — skipping auth header");
+  } catch (err) {
+    console.warn("[History:Client] getAuthHeaders() error:", err);
   }
   return {};
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRUD Operations
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Save a tool usage entry to history.
@@ -54,35 +62,64 @@ export async function saveHistory(params: {
 }): Promise<boolean> {
   try {
     const headers = await getAuthHeaders();
-    if (!headers["Authorization"]) return false; // Not authenticated, skip
+    if (!headers["Authorization"]) {
+      console.log("[History:Client] saveHistory() skipped — not authenticated");
+      return false;
+    }
 
+    console.log("[History:Client] saveHistory() POST →", params.toolId);
     const res = await fetch("/api/history", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify(params),
     });
-    return res.ok;
-  } catch {
-    // Silently fail — history is non-critical
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      console.warn("[History:Client] saveHistory() failed:", res.status, errData);
+      return false;
+    }
+
+    console.log("[History:Client] saveHistory() ✅ success");
+    return true;
+  } catch (err) {
+    console.warn("[History:Client] saveHistory() network error:", err);
     return false;
   }
 }
 
 /**
  * Get all history entries for the current user.
- * Returns { history, authenticated } so callers know if 401 means "sign in".
  */
-export async function getHistory(): Promise<{ history: HistoryEntry[]; authenticated: boolean }> {
+export async function getHistory(): Promise<{
+  history: HistoryEntry[];
+  authenticated: boolean;
+}> {
   try {
     const headers = await getAuthHeaders();
+
+    console.log("[History:Client] getHistory() GET, hasAuth:", !!headers["Authorization"]);
+
     const res = await fetch("/api/history", { headers });
+
+    // Not authenticated → show Sign In
     if (res.status === 401) {
+      console.log("[History:Client] getHistory() → 401 (not authenticated)");
       return { history: [], authenticated: false };
     }
-    if (!res.ok) return { history: [], authenticated: true };
+
+    // Server error → return empty, don't crash the UI
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      console.warn("[History:Client] getHistory() →", res.status, errData);
+      return { history: [], authenticated: true };
+    }
+
     const data = await res.json();
+    console.log("[History:Client] getHistory() ✅", (data.history || []).length, "entries");
     return { history: data.history || [], authenticated: true };
-  } catch {
+  } catch (err) {
+    console.warn("[History:Client] getHistory() network error:", err);
     return { history: [], authenticated: true };
   }
 }
@@ -124,16 +161,16 @@ export async function markDownloaded(id: string): Promise<boolean> {
   }
 }
 
-/**
- * Get tool display metadata.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Display Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function getToolMeta(toolId: string) {
-  return TOOL_META[toolId] || { color: "text-gray-600", bgColor: "bg-gray-50", icon: "📄" };
+  return (
+    TOOL_META[toolId] || { color: "text-gray-600", bgColor: "bg-gray-50", icon: "📄" }
+  );
 }
 
-/**
- * Format a date string for display.
- */
 export function formatHistoryDate(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -154,9 +191,6 @@ export function formatHistoryDate(dateStr: string): string {
   });
 }
 
-/**
- * Format file size for display.
- */
 export function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
   const k = 1024;
