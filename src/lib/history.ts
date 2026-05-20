@@ -1,13 +1,11 @@
 /**
  * History Module — Client-side functions for history management.
  *
- * Auth strategy: Supabase stores session in localStorage (browser).
- * The server cannot access localStorage, so we send the Supabase access_token
- * in the Authorization header with every request. The server uses this token
- * to verify the user via supabase.auth.getUser(token).
+ * Uses the API routes for server-side persistence.
+ * Falls back gracefully if the user is not authenticated.
  */
 
-import { supabase } from "@/lib/supabase";
+import { supabase } from "./supabase";
 
 export interface HistoryEntry {
   id: string;
@@ -21,53 +19,31 @@ export interface HistoryEntry {
   createdAt: string;
 }
 
-/** Result type that distinguishes auth failure from empty history. */
-export interface HistoryResult {
-  entries: HistoryEntry[];
-  authenticated: boolean;
-}
-
 /** Tool metadata for display purposes. */
 const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }> = {
   "pdf-summary": { color: "text-amber-600", bgColor: "bg-amber-50", icon: "✨" },
   "pdf-notes": { color: "text-emerald-600", bgColor: "bg-emerald-50", icon: "📝" },
   "resume-checker": { color: "text-blue-600", bgColor: "bg-blue-50", icon: "📋" },
-  "pdf-ocr": { color: "text-purple-600", bgColor: "bg-purple-50", icon: "🔍" },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Auth Header Helper
-//
-// Supabase stores session in localStorage → server never sees cookies.
-// Solution: Read the access_token from the Supabase client session and send
-// it as an Authorization: Bearer <token> header to every API call.
-// ─────────────────────────────────────────────────────────────────────────────
-
+/**
+ * Get auth headers from Supabase session (stored in localStorage).
+ * Returns empty headers if not authenticated.
+ */
 async function getAuthHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = {};
-
   try {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
+    const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
-      headers["Authorization"] = `Bearer ${session.access_token}`;
+      return { Authorization: `Bearer ${session.access_token}` };
     }
   } catch {
-    // Supabase not available — proceed without auth
+    // Silently fail
   }
-
-  return headers;
+  return {};
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// API Functions
-// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Save a tool usage entry to history.
- * Silently fails if not authenticated — history is non-critical.
  */
 export async function saveHistory(params: {
   toolId: string;
@@ -77,13 +53,12 @@ export async function saveHistory(params: {
   resultSummary: string;
 }): Promise<boolean> {
   try {
-    const authHeaders = await getAuthHeaders();
+    const headers = await getAuthHeaders();
+    if (!headers["Authorization"]) return false; // Not authenticated, skip
+
     const res = await fetch("/api/history", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...authHeaders,
-      },
+      headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify(params),
     });
     return res.ok;
@@ -95,43 +70,20 @@ export async function saveHistory(params: {
 
 /**
  * Get all history entries for the current user.
- *
- * Returns { entries, authenticated } so the UI can:
- *  - Show a "Please log in" message when authenticated === false
- *  - Show an empty state when authenticated === true && entries.length === 0
- *  - Show the history list when entries.length > 0
+ * Returns { history, authenticated } so callers know if 401 means "sign in".
  */
-export async function getHistory(): Promise<HistoryResult> {
+export async function getHistory(): Promise<{ history: HistoryEntry[]; authenticated: boolean }> {
   try {
-    const authHeaders = await getAuthHeaders();
-
-    // If no auth header, user is definitely not logged in
-    if (!authHeaders["Authorization"]) {
-      return { entries: [], authenticated: false };
-    }
-
-    const res = await fetch("/api/history", {
-      headers: authHeaders,
-    });
-
-    // 401 = token invalid or expired
+    const headers = await getAuthHeaders();
+    const res = await fetch("/api/history", { headers });
     if (res.status === 401) {
-      return { entries: [], authenticated: false };
+      return { history: [], authenticated: false };
     }
-
-    // Other non-ok responses (503, 500, etc.)
-    if (!res.ok) {
-      return { entries: [], authenticated: true };
-    }
-
+    if (!res.ok) return { history: [], authenticated: true };
     const data = await res.json();
-    return {
-      entries: data.history || [],
-      authenticated: true,
-    };
+    return { history: data.history || [], authenticated: true };
   } catch {
-    // Network error — treat as authenticated but empty
-    return { entries: [], authenticated: true };
+    return { history: [], authenticated: true };
   }
 }
 
@@ -140,10 +92,12 @@ export async function getHistory(): Promise<HistoryResult> {
  */
 export async function deleteHistoryItem(id: string): Promise<boolean> {
   try {
-    const authHeaders = await getAuthHeaders();
+    const headers = await getAuthHeaders();
+    if (!headers["Authorization"]) return false;
+
     const res = await fetch(`/api/history?id=${encodeURIComponent(id)}`, {
       method: "DELETE",
-      headers: authHeaders,
+      headers,
     });
     return res.ok;
   } catch {
@@ -156,13 +110,12 @@ export async function deleteHistoryItem(id: string): Promise<boolean> {
  */
 export async function markDownloaded(id: string): Promise<boolean> {
   try {
-    const authHeaders = await getAuthHeaders();
+    const headers = await getAuthHeaders();
+    if (!headers["Authorization"]) return false;
+
     const res = await fetch("/api/history", {
       method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        ...authHeaders,
-      },
+      headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify({ id, downloaded: true }),
     });
     return res.ok;
@@ -170,10 +123,6 @@ export async function markDownloaded(id: string): Promise<boolean> {
     return false;
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Display Helpers
-// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Get tool display metadata.
