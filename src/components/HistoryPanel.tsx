@@ -7,13 +7,11 @@ import {
   Clock,
   FileText,
   Trash2,
-  Download,
   Eye,
   Sparkles,
   BookOpen,
   UserCheck,
   Inbox,
-  X,
   Loader2,
   LogIn,
 } from "lucide-react";
@@ -42,29 +40,18 @@ import {
 const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   "pdf-summary": Sparkles,
   "pdf-notes": BookOpen,
+  "pdf-ocr": Eye,
   "resume-checker": UserCheck,
 };
 
 export default function HistoryPanel() {
   const { navigateHome, selectTool } = useAppStore();
-  const { setAuthDialogOpen } = useAuthStore();
+  const { isLoading: isLoadingAuth, setAuthDialogOpen, session } = useAuthStore();
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  const loadHistory = useCallback(async () => {
-    setLoading(true);
-    const result = await getHistory();
-    setHistory(result.history);
-    setAuthenticated(result.authenticated);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    loadHistory();
-  }, [loadHistory]);
 
   const handleDelete = async () => {
     if (!deleteId) return;
@@ -79,12 +66,40 @@ export default function HistoryPanel() {
     selectTool(entry.toolId);
   };
 
+  // ─────────────────────────────────────────────────────────────────
+  // KEY FIX: Wait for auth to initialize BEFORE calling the API.
+  // Supabase reads session from localStorage asynchronously.
+  // If we call /api/history before session is ready → no token → 401.
+  //
+  // We use a subscription-style callback inside getHistory so the
+  // setState happens inside an async callback (not synchronously).
+  // ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    // Still initializing auth — show spinner, don't fetch
+    if (isLoadingAuth) return;
+
+    let cancelled = false;
+
+    // Async callback — setState happens inside here, not synchronously
+    (async () => {
+      setLoading(true);
+      console.log("[HistoryPanel] Auth ready. Session:", session ? "YES" : "NO");
+      const result = await getHistory();
+      if (!cancelled) {
+        setHistory(result.history);
+        setAuthenticated(result.authenticated);
+        setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [isLoadingAuth, session]); // Re-run when auth finishes or session changes
+
   return (
     <div className="min-h-screen pt-20 bg-card">
       {/* ── Header ── */}
       <section className="border-b border-border bg-muted/30">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-          {/* Breadcrumb */}
           <motion.button
             initial={{ opacity: 0, x: -10 }}
             animate={{ opacity: 1, x: 0 }}
@@ -117,7 +132,7 @@ export default function HistoryPanel() {
 
       {/* ── Content ── */}
       <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {loading ? (
+        {loading || isLoadingAuth ? (
           <div className="flex items-center justify-center py-20">
             <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
             <span className="ml-2 text-sm text-muted-foreground">Loading history...</span>
@@ -188,12 +203,10 @@ export default function HistoryPanel() {
                     className="group bg-card border border-border rounded-xl p-4 sm:p-5 hover:shadow-md hover:border-border transition-all"
                   >
                     <div className="flex items-start gap-3 sm:gap-4">
-                      {/* Tool Icon */}
                       <div className={`w-10 h-10 rounded-xl ${meta.bgColor} flex items-center justify-center flex-shrink-0`}>
                         <ToolIcon className={`w-5 h-5 ${meta.color}`} />
                       </div>
 
-                      {/* Content */}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
@@ -220,7 +233,6 @@ export default function HistoryPanel() {
                                 </Badge>
                               )}
                             </div>
-                            {/* Result summary preview */}
                             {entry.resultSummary && (
                               <p className="text-xs text-muted-foreground mt-1.5 line-clamp-1 max-w-md">
                                 {entry.resultSummary}
@@ -228,7 +240,6 @@ export default function HistoryPanel() {
                             )}
                           </div>
 
-                          {/* Actions */}
                           <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                             <Button
                               variant="ghost"
@@ -260,7 +271,7 @@ export default function HistoryPanel() {
         )}
       </section>
 
-      {/* ── Delete Confirmation Dialog ── */}
+      {/* ── Delete Dialog ── */}
       <Dialog open={!!deleteId} onOpenChange={(open) => { if (!open) setDeleteId(null); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -273,11 +284,7 @@ export default function HistoryPanel() {
             <Button variant="outline" onClick={() => setDeleteId(null)} disabled={deleting}>
               Cancel
             </Button>
-            <Button
-              variant="destructive"
-              onClick={handleDelete}
-              disabled={deleting}
-            >
+            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
               {deleting && <Loader2 className="w-4 h-4 mr-1 animate-spin" />}
               Delete
             </Button>
