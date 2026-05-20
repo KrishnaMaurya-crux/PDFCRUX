@@ -16,7 +16,6 @@ import {
   X,
   Loader2,
   LogIn,
-  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,44 +47,24 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
 
 export default function HistoryPanel() {
   const { navigateHome, selectTool } = useAppStore();
-  const setAuthDialogOpen = useAuthStore((s) => s.setAuthDialogOpen);
-
+  const { setAuthDialogOpen } = useAuthStore();
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null); // null = unknown, true = yes, false = no
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const loadHistory = useCallback(async () => {
     setLoading(true);
-    setAuthenticated(null);
     const result = await getHistory();
-    setHistory(result.entries);
+    setHistory(result.history);
     setAuthenticated(result.authenticated);
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const result = await getHistory();
-      if (!cancelled) {
-        setHistory(result.entries);
-        setAuthenticated(result.authenticated);
-        setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  // Reload history when user logs in (auth state changes)
-  const user = useAuthStore((s) => s.user);
-  useEffect(() => {
-    // Only reload if auth state is resolved and user just logged in
-    if (authenticated === false && user) {
-      loadHistory();
-    }
-  }, [user, authenticated, loadHistory]);
+    loadHistory();
+  }, [loadHistory]);
 
   const handleDelete = async () => {
     if (!deleteId) return;
@@ -98,10 +77,6 @@ export default function HistoryPanel() {
 
   const handleViewResult = (entry: HistoryEntry) => {
     selectTool(entry.toolId);
-  };
-
-  const handleLogin = () => {
-    setAuthDialogOpen(true, "login");
   };
 
   return (
@@ -143,34 +118,33 @@ export default function HistoryPanel() {
       {/* ── Content ── */}
       <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {loading ? (
-          /* ── Loading State ── */
           <div className="flex items-center justify-center py-20">
             <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
             <span className="ml-2 text-sm text-muted-foreground">Loading history...</span>
           </div>
         ) : authenticated === false ? (
-          /* ── Not Authenticated State ── */
+          /* ── Not Authenticated ── */
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             className="flex flex-col items-center justify-center py-20"
           >
-            <div className="w-16 h-16 rounded-2xl bg-amber-50 dark:bg-amber-950/30 flex items-center justify-center mb-4">
-              <ShieldCheck className="w-8 h-8 text-amber-500" />
+            <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
+              <LogIn className="w-8 h-8 text-muted-foreground" />
             </div>
             <h3 className="text-lg font-semibold text-foreground mb-1">
-              Please sign in to view history
+              Sign in to view history
             </h3>
             <p className="text-sm text-muted-foreground mb-6 text-center max-w-xs">
-              Your tool usage history is saved securely with your account. Sign in to see your past activity and results.
+              Your tool usage history is saved when you&apos;re signed in. Sign in to see your past activity.
             </p>
-            <Button onClick={handleLogin} className="gap-2">
+            <Button onClick={() => setAuthDialogOpen(true, "login")} className="gap-2">
               <LogIn className="w-4 h-4" />
               Sign In
             </Button>
           </motion.div>
         ) : history.length === 0 ? (
-          /* ── Empty State (authenticated but no history) ── */
+          /* ── Empty State ── */
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -197,15 +171,6 @@ export default function HistoryPanel() {
               <p className="text-sm text-muted-foreground">
                 {history.length} item{history.length !== 1 ? "s" : ""}
               </p>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-xs text-muted-foreground hover:text-foreground gap-1.5"
-                onClick={loadHistory}
-              >
-                <Download className="w-3.5 h-3.5" />
-                Refresh
-              </Button>
             </div>
 
             <AnimatePresence>
