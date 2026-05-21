@@ -255,19 +255,20 @@ export default function InvoiceGenerator() {
 
       toast({ title: "Invoice downloaded!", description: `${invoiceData.invoiceNumber}.pdf` });
       // Save to history
+      const currentTotals = calculateTotals(invoiceData.items, invoiceData.taxPercent, invoiceData.discountPercent, invoiceData.shippingCharge, invoiceData.amountPaid, invoiceData.previousDue);
       saveHistory({
         toolId: "invoice-generator",
         toolName: "Invoice Generator",
         fileName: `${invoiceData.invoiceNumber}.pdf`,
         fileSize: 0,
-        resultSummary: `Invoice ${invoiceData.invoiceNumber} — ${formatCurrencyDisplay(totals.total, invoiceData.currency)}`,
+        resultSummary: `Invoice ${invoiceData.invoiceNumber} — ${formatCurrencyDisplay(currentTotals.total, invoiceData.currency)}`,
       });
     } catch (err) {
       console.error("PDF generation error:", err);
       toast({ title: "Error", description: `Failed to generate PDF: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
     }
     setIsGenerating(false);
-  }, [invoiceData, toast, captureInvoiceAsCanvas, totals, downloadFormat]);
+  }, [invoiceData, toast, captureInvoiceAsCanvas]);
 
   const handlePrint = useCallback(() => {
     window.print();
@@ -302,7 +303,7 @@ export default function InvoiceGenerator() {
       toast({ title: "Error", description: `Failed to generate ${format.toUpperCase()}: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
     }
     setIsGenerating(false);
-  }, [invoiceData, toast, captureInvoiceAsCanvas, downloadFormat]);
+  }, [invoiceData, toast, captureInvoiceAsCanvas]);
 
   const handleDownloadAll = useCallback(async () => {
     if (downloadFormat === "pdf") {
