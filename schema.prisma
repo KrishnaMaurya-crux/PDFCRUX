@@ -1,0 +1,57 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  plan      String   @default("free") // "free" | "premium" | "enterprise"
+  tokensNonAI  Int    @default(12)
+  tokensAI     Int    @default(3)
+  tokenResetAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  histories History[]
+}
+
+model History {
+  id            String   @id @default(cuid())
+  userId        String
+  toolId        String
+  toolName      String
+  fileName      String
+  fileSize      Int
+  resultSummary String   @default("")
+  downloaded    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([toolId])
+  @@index([createdAt])
+}
+
+model ContactSales {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  teamSize  String?
+  message   String?
+  status    String   @default("new") // "new" | "contacted" | "converted" | "closed"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
