@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft,
@@ -14,6 +14,8 @@ import {
   Inbox,
   Loader2,
   LogIn,
+  RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,7 +38,6 @@ import {
   formatFileSize,
 } from "@/lib/history";
 
-/** Icon map for tool types. */
 const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   "pdf-summary": Sparkles,
   "pdf-notes": BookOpen,
@@ -44,14 +45,76 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   "resume-checker": UserCheck,
 };
 
+// ─────────────────────────────────────────────────────────────────────────
+// 5-second timeout — if loading takes longer, show error
+// ─────────────────────────────────────────────────────────────────────────
+const LOAD_TIMEOUT_MS = 8000;
+
 export default function HistoryPanel() {
   const { navigateHome, selectTool } = useAppStore();
   const { isLoading: isLoadingAuth, setAuthDialogOpen, session } = useAuthStore();
+
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  console.log("[HistoryPanel] RENDER — loading:", loading, "auth:", isLoadingAuth, "session:", !!session, "error:", error);
+
+  // ─────────────────────────────────────────────────────────────────
+  // Main fetch logic — separated so both auto-load + manual refresh use it
+  // ─────────────────────────────────────────────────────────────────
+  async function doLoadHistory() {
+    console.log("[HistoryPanel] doLoadHistory() START");
+    setLoading(true);
+    setError(null);
+
+    // 5-second timeout safety net
+    const timeoutId = setTimeout(() => {
+      console.warn("[HistoryPanel] ⏰ LOAD TIMEOUT — 8 seconds reached");
+      setError("Unable to load history. Check your connection.");
+      setLoading(false);
+    }, LOAD_TIMEOUT_MS);
+
+    try {
+      console.log("[HistoryPanel] Calling getHistory()...");
+      const result = await getHistory();
+      clearTimeout(timeoutId);
+
+      console.log("[HistoryPanel] getHistory() returned:", {
+        entries: result.history.length,
+        authenticated: result.authenticated,
+      });
+
+      setHistory(result.history);
+      setAuthenticated(result.authenticated);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[HistoryPanel] 💥 doLoadHistory() CATCH:", msg);
+      setError(`Failed to load history: ${msg}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // useEffect — TRIGGER LOG
+  // ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    console.log("[HistoryPanel] useEffect FIRED — isLoadingAuth:", isLoadingAuth, "session:", !!session);
+
+    // CRITICAL: Do NOT fetch until auth has initialized
+    if (isLoadingAuth) {
+      console.log("[HistoryPanel] ⏳ Auth still loading — waiting...");
+      return;
+    }
+
+    console.log("[HistoryPanel] ✅ Auth ready — fetching history NOW");
+    doLoadHistory();
+  }, [isLoadingAuth, session]);
 
   const handleDelete = async () => {
     if (!deleteId) return;
@@ -67,34 +130,8 @@ export default function HistoryPanel() {
   };
 
   // ─────────────────────────────────────────────────────────────────
-  // KEY FIX: Wait for auth to initialize BEFORE calling the API.
-  // Supabase reads session from localStorage asynchronously.
-  // If we call /api/history before session is ready → no token → 401.
-  //
-  // We use a subscription-style callback inside getHistory so the
-  // setState happens inside an async callback (not synchronously).
+  // Render
   // ─────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    // Still initializing auth — show spinner, don't fetch
-    if (isLoadingAuth) return;
-
-    let cancelled = false;
-
-    // Async callback — setState happens inside here, not synchronously
-    (async () => {
-      setLoading(true);
-      console.log("[HistoryPanel] Auth ready. Session:", session ? "YES" : "NO");
-      const result = await getHistory();
-      if (!cancelled) {
-        setHistory(result.history);
-        setAuthenticated(result.authenticated);
-        setLoading(false);
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [isLoadingAuth, session]); // Re-run when auth finishes or session changes
-
   return (
     <div className="min-h-screen pt-20 bg-card">
       {/* ── Header ── */}
@@ -115,13 +152,30 @@ export default function HistoryPanel() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
           >
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-                <Clock className="w-5 h-5 text-primary" />
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+                  <Clock className="w-5 h-5 text-primary" />
+                </div>
+                <h1 className="text-2xl sm:text-3xl font-bold text-foreground">
+                  My Activity
+                </h1>
               </div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-foreground">
-                My Activity
-              </h1>
+
+              {/* ── REFRESH BUTTON ── */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  console.log("[HistoryPanel] Manual refresh clicked");
+                  doLoadHistory();
+                }}
+                disabled={loading}
+                className="gap-2"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                Refresh
+              </Button>
             </div>
             <p className="text-muted-foreground text-sm sm:text-base">
               View your recent tool usage and results.
@@ -132,11 +186,43 @@ export default function HistoryPanel() {
 
       {/* ── Content ── */}
       <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Loading state (auth OR data) */}
         {loading || isLoadingAuth ? (
-          <div className="flex items-center justify-center py-20">
-            <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-            <span className="ml-2 text-sm text-muted-foreground">Loading history...</span>
+          <div className="flex flex-col items-center justify-center py-20">
+            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground mb-3" />
+            <span className="text-sm text-muted-foreground">
+              {isLoadingAuth ? "Checking authentication..." : "Loading history..."}
+            </span>
           </div>
+        ) : error ? (
+          /* ── ERROR STATE ── */
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex flex-col items-center justify-center py-20"
+          >
+            <div className="w-16 h-16 rounded-2xl bg-red-50 flex items-center justify-center mb-4">
+              <AlertTriangle className="w-8 h-8 text-red-500" />
+            </div>
+            <h3 className="text-lg font-semibold text-foreground mb-1">
+              Something went wrong
+            </h3>
+            <p className="text-sm text-muted-foreground mb-2 text-center max-w-sm">
+              {error}
+            </p>
+            <p className="text-xs text-muted-foreground mb-6 text-center max-w-sm">
+              Auth: {authenticated === false ? "❌ Not signed in" : authenticated === true ? "✅ Signed in" : "❓ Unknown"} | Session: {session ? "YES" : "NO"}
+            </p>
+            <div className="flex gap-3">
+              <Button onClick={() => doLoadHistory()} variant="outline" className="gap-2">
+                <RefreshCw className="w-4 h-4" />
+                Try Again
+              </Button>
+              <Button onClick={navigateHome} className="gap-2">
+                Go Home
+              </Button>
+            </div>
+          </motion.div>
         ) : authenticated === false ? (
           /* ── Not Authenticated ── */
           <motion.div
