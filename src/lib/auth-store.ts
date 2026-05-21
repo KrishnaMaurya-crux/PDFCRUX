@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createClient } from "./supabase";
+import { supabase } from "./supabase";
 import type { User, Session } from "@supabase/supabase-js";
 
 interface AuthState {
@@ -29,7 +29,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   initialize: async () => {
     try {
-      const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
 
       if (session) {
@@ -65,7 +64,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   signUpWithEmail: async (email, password, name) => {
     try {
-      const supabase = createClient();
       const { error } = await supabase.auth.signUp({
         email,
         password,
@@ -78,7 +76,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return { error: getErrorMessage(error.message) };
       }
 
-      // If no error and no session, email confirmation required
       const { data: { session: newSession } } = await supabase.auth.getSession();
       if (newSession) {
         set({
@@ -86,10 +83,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           session: newSession,
           isAuthDialogOpen: false,
         });
-        // Execute pending action after successful signup
         setTimeout(() => get().executePendingAction(), 100);
       } else {
-        // Email confirmation needed
         set({ isAuthDialogOpen: false });
       }
 
@@ -101,7 +96,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loginWithEmail: async (email, password) => {
     try {
-      const supabase = createClient();
       const { error } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -118,7 +112,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isAuthDialogOpen: false,
       });
 
-      // Execute pending action after successful login
       setTimeout(() => get().executePendingAction(), 100);
 
       return { error: null };
@@ -129,9 +122,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loginWithGoogle: async () => {
     try {
-      const supabase = createClient();
-      // Always use the live production URL for redirect — never localhost.
-      // window.location.origin can be wrong inside iframes or sandbox proxies.
       const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
@@ -150,7 +140,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     try {
-      const supabase = createClient();
       await supabase.auth.signOut();
       set({ user: null, session: null });
     } catch {
