@@ -46,7 +46,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAppStore } from "@/lib/store";
 import { useToast } from "@/hooks/use-toast";
-import { saveHistory } from "@/lib/history";
+import { saveHistoryWithFile } from "@/lib/history";
 import {
   runBulkCompression,
   generateZip,
@@ -755,11 +755,12 @@ export default function BulkCompressPDF() {
       });
       // Save to history
       const savings = calculateSavings(totalOriginalSize, totalCompressedSize);
-      saveHistory({
+      saveHistoryWithFile({
+        fileData: zipBlob,
         toolId: "bulk-compress-pdf",
         toolName: "Bulk Compress PDF",
         fileName: "compressed-pdfs.zip",
-        fileSize: totalCompressedSize,
+        fileSize: zipBlob.size,
         resultSummary: `${completedFiles.length} files compressed, ${savings}% saved`,
       });
     } catch {

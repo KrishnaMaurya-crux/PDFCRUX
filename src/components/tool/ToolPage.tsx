@@ -43,7 +43,7 @@ import {
 } from "@/lib/pdf-processor";
 import CloudStorageButtons from "@/components/tool/CloudStorageButtons";
 import { saveToGoogleDrive } from "@/lib/google-drive";
-import { saveHistory } from "@/lib/history";
+import { saveHistory, saveHistoryWithFile } from "@/lib/history";
 
 
 function formatFileSize(bytes: number): string {
@@ -667,9 +667,10 @@ export default function ToolPage() {
         title: "Download started!",
         description: `${outFile.name} (${formatFileSize(outFile.size)})`,
       });
-      // Save to history
+      // Upload to R2 + save history
       const inputName = uploadedFiles.length > 0 ? uploadedFiles[0].name : outFile.name;
-      saveHistory({
+      saveHistoryWithFile({
+        fileData: new Uint8Array(outFile.data),
         toolId: selectedToolId,
         toolName: tool?.name || selectedToolId,
         fileName: outFile.name,
