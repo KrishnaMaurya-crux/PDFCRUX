@@ -7,7 +7,7 @@ const globalForPrisma = globalThis as unknown as {
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
-    // Only log queries in development — NOT in production/serverless
+    // Only log queries in development — NOT in production (causes crash on Vercel)
     log: process.env.NODE_ENV === 'development' ? ['query'] : [],
   })
 

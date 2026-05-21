@@ -3,6 +3,9 @@
  *
  * Uses the API routes for server-side persistence.
  * Falls back gracefully if the user is not authenticated.
+ *
+ * CRITICAL: Auth headers are fetched from Supabase session (localStorage).
+ * The token is sent via Authorization: Bearer <token> to the backend.
  */
 
 import { supabase } from "./supabase";
@@ -19,7 +22,6 @@ export interface HistoryEntry {
   createdAt: string;
 }
 
-/** Tool metadata for display purposes. */
 const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }> = {
   "pdf-summary": { color: "text-amber-600", bgColor: "bg-amber-50", icon: "✨" },
   "pdf-notes": { color: "text-emerald-600", bgColor: "bg-emerald-50", icon: "📝" },
@@ -27,9 +29,9 @@ const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }
   "resume-checker": { color: "text-blue-600", bgColor: "bg-blue-50", icon: "📋" },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Auth: Get Bearer token from Supabase session (localStorage)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// Get Bearer token from Supabase session (stored in localStorage)
+// ─────────────────────────────────────────────────────────────────
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   try {
@@ -37,22 +39,20 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
       data: { session },
     } = await supabase.auth.getSession();
     if (session?.access_token) {
+      console.log("[History:Client] ✅ Token found, length:", session.access_token.length);
       return { Authorization: `Bearer ${session.access_token}` };
     }
-    console.log("[History:Client] No active session — skipping auth header");
+    console.log("[History:Client] ⚠️ No active session — no auth header");
   } catch (err) {
     console.warn("[History:Client] getAuthHeaders() error:", err);
   }
   return {};
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CRUD Operations
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// Save history entry
+// ─────────────────────────────────────────────────────────────────
 
-/**
- * Save a tool usage entry to history.
- */
 export async function saveHistory(params: {
   toolId: string;
   toolName: string;
@@ -88,35 +88,42 @@ export async function saveHistory(params: {
   }
 }
 
-/**
- * Get all history entries for the current user.
- */
+// ─────────────────────────────────────────────────────────────────
+// Get history entries — returns { history, authenticated }
+// ─────────────────────────────────────────────────────────────────
+
 export async function getHistory(): Promise<{
   history: HistoryEntry[];
   authenticated: boolean;
 }> {
   try {
+    // Get auth headers (reads Supabase session from localStorage)
     const headers = await getAuthHeaders();
+    const hasAuth = !!headers["Authorization"];
 
-    console.log("[History:Client] getHistory() GET, hasAuth:", !!headers["Authorization"]);
+    console.log("[History:Client] getHistory() GET, hasAuth:", hasAuth);
 
-    const res = await fetch("/api/history", { headers });
+    const res = await fetch("/api/history", {
+      headers,
+    });
 
-    // Not authenticated → show Sign In
+    console.log("[History:Client] getHistory() response status:", res.status);
+
+    // 401 = not authenticated
     if (res.status === 401) {
-      console.log("[History:Client] getHistory() → 401 (not authenticated)");
+      console.log("[History:Client] → 401 Not authenticated");
       return { history: [], authenticated: false };
     }
 
-    // Server error → return empty, don't crash the UI
+    // Server error
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
-      console.warn("[History:Client] getHistory() →", res.status, errData);
-      return { history: [], authenticated: true };
+      console.warn("[History:Client] →", res.status, "error:", errData);
+      return { history: [], authenticated: hasAuth };
     }
 
     const data = await res.json();
-    console.log("[History:Client] getHistory() ✅", (data.history || []).length, "entries");
+    console.log("[History:Client] ✅ Received", (data.history || []).length, "entries");
     return { history: data.history || [], authenticated: true };
   } catch (err) {
     console.warn("[History:Client] getHistory() network error:", err);
@@ -124,9 +131,10 @@ export async function getHistory(): Promise<{
   }
 }
 
-/**
- * Delete a history entry by ID.
- */
+// ─────────────────────────────────────────────────────────────────
+// Delete history entry
+// ─────────────────────────────────────────────────────────────────
+
 export async function deleteHistoryItem(id: string): Promise<boolean> {
   try {
     const headers = await getAuthHeaders();
@@ -142,9 +150,10 @@ export async function deleteHistoryItem(id: string): Promise<boolean> {
   }
 }
 
-/**
- * Mark a history entry as downloaded.
- */
+// ─────────────────────────────────────────────────────────────────
+// Mark entry as downloaded
+// ─────────────────────────────────────────────────────────────────
+
 export async function markDownloaded(id: string): Promise<boolean> {
   try {
     const headers = await getAuthHeaders();
@@ -161,9 +170,9 @@ export async function markDownloaded(id: string): Promise<boolean> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Display Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// Display helpers
+// ─────────────────────────────────────────────────────────────────
 
 export function getToolMeta(toolId: string) {
   return (

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { supabase } from "./supabase";
+import { createClient } from "./supabase";
 import type { User, Session } from "@supabase/supabase-js";
 
 interface AuthState {
@@ -29,6 +29,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   initialize: async () => {
     try {
+      const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
 
       if (session) {
@@ -42,7 +43,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
 
       // Listen for auth changes
-      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      supabase.auth.onAuthStateChange((_event, session) => {
         set({
           user: session?.user ?? null,
           session,
@@ -64,6 +65,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   signUpWithEmail: async (email, password, name) => {
     try {
+      const supabase = createClient();
       const { error } = await supabase.auth.signUp({
         email,
         password,
@@ -99,6 +101,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loginWithEmail: async (email, password) => {
     try {
+      const supabase = createClient();
       const { error } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -126,6 +129,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   loginWithGoogle: async () => {
     try {
+      const supabase = createClient();
       // Always use the live production URL for redirect — never localhost.
       // window.location.origin can be wrong inside iframes or sandbox proxies.
       const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
@@ -146,6 +150,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     try {
+      const supabase = createClient();
       await supabase.auth.signOut();
       set({ user: null, session: null });
     } catch {
