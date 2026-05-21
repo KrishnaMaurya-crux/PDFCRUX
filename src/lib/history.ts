@@ -17,9 +17,28 @@ export interface HistoryEntry {
   toolName: string;
   fileName: string;
   fileSize: number;
+  fileUrl?: string | null;
+  r2Key?: string | null;
   resultSummary: string;
   downloaded: boolean;
   createdAt: string;
+}
+
+export interface StorageUsage {
+  plan: string;
+  planLabel: string;
+  planPrice: string;
+  storageUsed: number;
+  storageUsedFormatted: string;
+  storageLimit: number;
+  storageLimitFormatted: string;
+  storagePercent: number;
+  downloadCount: number;
+  downloadLimit: number;
+  historyCount: number;
+  historyLimit: number;
+  features: string[];
+  isDevMode: boolean;
 }
 
 const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }> = {
@@ -89,12 +108,66 @@ export async function saveHistory(params: {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Save history WITH file upload to R2
+// Use this for tools that produce downloadable files
+// ─────────────────────────────────────────────────────────────────
+
+export async function saveHistoryWithFile(params: {
+  fileData: Uint8Array | Blob;
+  toolId: string;
+  toolName: string;
+  fileName: string;
+  fileSize: number;
+  resultSummary: string;
+}): Promise<boolean> {
+  try {
+    const headers = await getAuthHeaders();
+    if (!headers["Authorization"]) {
+      console.log("[History:Client] saveHistoryWithFile() skipped — not authenticated");
+      return false;
+    }
+
+    console.log("[History:Client] saveHistoryWithFile() →", params.fileName);
+
+    // Create FormData
+    const file = params.fileData instanceof Blob
+      ? params.fileData
+      : new Blob([params.fileData]);
+    const formData = new FormData();
+    formData.append("file", file, params.fileName);
+    formData.append("toolId", params.toolId);
+    formData.append("toolName", params.toolName);
+    formData.append("fileName", params.fileName);
+    formData.append("resultSummary", params.resultSummary);
+
+    const res = await fetch("/api/storage/upload", {
+      method: "POST",
+      headers, // No Content-Type — browser sets it with boundary for FormData
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      console.warn("[History:Client] saveHistoryWithFile() failed:", res.status, errData);
+      return false;
+    }
+
+    console.log("[History:Client] saveHistoryWithFile() ✅ success");
+    return true;
+  } catch (err) {
+    console.warn("[History:Client] saveHistoryWithFile() error:", err);
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Get history entries — returns { history, authenticated }
 // ─────────────────────────────────────────────────────────────────
 
 export async function getHistory(): Promise<{
   history: HistoryEntry[];
   authenticated: boolean;
+  debug?: string;
 }> {
   try {
     // Get auth headers (reads Supabase session from localStorage)
@@ -115,11 +188,12 @@ export async function getHistory(): Promise<{
       return { history: [], authenticated: false };
     }
 
-    // Server error
+    // Server error — capture debug message for UI
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
+      const debugMsg = (errData as Record<string, string>).debug || (errData as Record<string, string>).error || `HTTP ${res.status}`;
       console.warn("[History:Client] →", res.status, "error:", errData);
-      return { history: [], authenticated: hasAuth };
+      return { history: [], authenticated: hasAuth, debug: debugMsg };
     }
 
     const data = await res.json();
@@ -206,4 +280,29 @@ export function formatFileSize(bytes: number): string {
   const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Get storage usage info
+// ─────────────────────────────────────────────────────────────────
+
+export async function getStorageUsage(): Promise<StorageUsage | null> {
+  try {
+    const headers = await getAuthHeaders();
+    if (!headers["Authorization"]) return null;
+
+    const res = await fetch("/api/storage/usage", { headers });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Get download URL for a history entry
+// ─────────────────────────────────────────────────────────────────
+
+export function getDownloadUrl(historyId: string): string {
+  return `/api/storage/download?id=${encodeURIComponent(historyId)}`;
 }
