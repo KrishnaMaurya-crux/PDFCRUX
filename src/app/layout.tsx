@@ -4,6 +4,7 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/ThemeProvider";
+import { AuthProvider } from "@/components/auth/AuthProvider";
 import { LanguageProvider } from "@/lib/i18n";
 
 const geistSans = Geist({
@@ -106,9 +107,11 @@ export default function RootLayout({
       >
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
           <LanguageProvider>
-            <TooltipProvider delayDuration={300}>
-              {children}
-            </TooltipProvider>
+            <AuthProvider>
+              <TooltipProvider delayDuration={300}>
+                {children}
+              </TooltipProvider>
+            </AuthProvider>
           </LanguageProvider>
         </ThemeProvider>
         <Toaster />
