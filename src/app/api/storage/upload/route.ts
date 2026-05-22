@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { uploadToR2, generateFileKey } from "@/lib/r2";
-import { getPlanConfig, canStoreMore, IS_DEV_MODE } from "@/lib/plan-config";
+import { getPlanConfig, IS_DEV_MODE } from "@/lib/plan-config";
 
 // ─────────────────────────────────────────────────────────────────
 // Force Node.js runtime — R2 + Prisma require it
@@ -34,6 +34,10 @@ async function findOrCreateUser(email: string) {
 // ─────────────────────────────────────────────────────────────────
 // POST /api/storage/upload
 // FormData: file, toolId, toolName, fileName, resultSummary
+//
+// IMPORTANT: This route has a fallback — if R2 is not configured,
+// it still saves history metadata-only (no fileUrl/r2Key).
+// This ensures history ALWAYS works, with or without R2.
 // ─────────────────────────────────────────────────────────────────
 export async function POST(req: Request) {
   console.log("[Storage:Upload] ═══ POST ═══");
@@ -47,6 +51,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Check if R2 is configured
+  const r2Configured = !!(
+    process.env.R2_ACCOUNT_ID &&
+    process.env.R2_ACCESS_KEY_ID &&
+    process.env.R2_SECRET_ACCESS_KEY
+  );
+
   try {
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
@@ -55,24 +66,50 @@ export async function POST(req: Request) {
     const fileName = formData.get("fileName") as string;
     const resultSummary = (formData.get("resultSummary") as string) || "";
 
-    if (!file || !toolId || !toolName || !fileName) {
+    if (!toolId || !toolName || !fileName) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    }
+
+    const fileSize = file ? file.size : 0;
+
+    // ── FALLBACK: R2 NOT configured → save metadata-only history ──
+    if (!r2Configured) {
+      console.log("[Storage:Upload] ⚠️ R2 not configured — saving metadata-only history");
+      const user = await findOrCreateUser(supabaseUser.email);
+      const entry = await db.history.create({
+        data: {
+          userId: user.id,
+          toolId,
+          toolName,
+          fileName,
+          fileSize,
+          resultSummary,
+        },
+      });
+      console.log("[Storage:Upload] ✅ Metadata-only saved:", entry.id);
+      return NextResponse.json({ success: true, entry, mode: "metadata-only" });
+    }
+
+    // ── FULL FLOW: R2 IS configured ──
+    if (!file) {
+      return NextResponse.json({ error: "Missing file" }, { status: 400 });
     }
 
     const user = await findOrCreateUser(supabaseUser.email);
     const plan = (user.plan as "free" | "premium" | "enterprise") || "free";
 
     // Check storage limit
-    const fileKB = Math.ceil(file.size / 1024);
+    const fileKB = Math.ceil(fileSize / 1024);
     if (!IS_DEV_MODE) {
       const config = getPlanConfig(plan);
-      if (config.storageLimit > 0 && user.storageUsed + fileKB > config.storageLimit) {
+      const currentStorage = user.storageUsed ?? 0;
+      if (config.storageLimit > 0 && currentStorage + fileKB > config.storageLimit) {
         console.log("[Storage:Upload] ❌ Storage limit exceeded");
         return NextResponse.json({
           error: "Storage limit reached",
           reason: "upgrade",
           plan,
-          storageUsed: user.storageUsed,
+          storageUsed: currentStorage,
           storageLimit: config.storageLimit,
         }, { status: 429 });
       }
@@ -92,7 +129,7 @@ export async function POST(req: Request) {
         toolId,
         toolName,
         fileName,
-        fileSize: file.size,
+        fileSize,
         fileUrl: uploadResult.url,
         r2Key: uploadResult.key,
         resultSummary,
@@ -117,6 +154,29 @@ export async function POST(req: Request) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[Storage:Upload] 💥", msg);
+
+    // FALLBACK: If R2 upload crashes, try metadata-only save
+    try {
+      const clonedReq = req.clone();
+      const formData = await clonedReq.formData();
+      const toolId = formData.get("toolId") as string;
+      const toolName = formData.get("toolName") as string;
+      const fileName = formData.get("fileName") as string;
+      const resultSummary = (formData.get("resultSummary") as string) || "";
+      const fileSize = (formData.get("file") as File | null)?.size || 0;
+
+      if (toolId && toolName && fileName) {
+        const user = await findOrCreateUser(supabaseUser.email);
+        const entry = await db.history.create({
+          data: { userId: user.id, toolId, toolName, fileName, fileSize, resultSummary },
+        });
+        console.log("[Storage:Upload] ✅ Fallback metadata-only saved:", entry.id);
+        return NextResponse.json({ success: true, entry, mode: "fallback" });
+      }
+    } catch (fallbackErr) {
+      console.error("[Storage:Upload] Fallback also failed:", fallbackErr);
+    }
+
     return NextResponse.json({ error: "Upload failed", debug: msg }, { status: 500 });
   }
 }
