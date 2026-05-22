@@ -463,14 +463,12 @@ export default function HistoryPanel() {
                               <Clock className="w-3 h-3" />
                               {formatHistoryDate(entry.createdAt)}
                             </span>
-                            <span>{formatFileSize(entry.fileSize)}</span>
-                            {hasFile ? (
+                            {entry.fileSize > 0 && (
+                              <span>{formatFileSize(entry.fileSize)}</span>
+                            )}
+                            {hasFile && (
                               <Badge variant="secondary" className="text-[10px] rounded-full px-1.5 py-0 bg-emerald-50 text-emerald-700 border-0 dark:bg-emerald-900/30 dark:text-emerald-400">
                                 Cloud stored
-                              </Badge>
-                            ) : (
-                              <Badge variant="secondary" className="text-[10px] rounded-full px-1.5 py-0 bg-muted text-muted-foreground border-0">
-                                No file
                               </Badge>
                             )}
                             {entry.downloaded && (
