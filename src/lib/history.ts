@@ -148,15 +148,31 @@ export async function saveHistoryWithFile(params: {
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
-      console.warn("[History:Client] saveHistoryWithFile() failed:", res.status, errData);
-      return false;
+      console.warn("[History:Client] saveHistoryWithFile() R2 upload failed:", res.status, errData);
+      // FALLBACK: If R2 upload fails (not configured, storage full, etc.),
+      // still save history as metadata-only so user sees activity
+      console.log("[History:Client] → Falling back to metadata-only saveHistory()");
+      return saveHistory({
+        toolId: params.toolId,
+        toolName: params.toolName,
+        fileName: params.fileName,
+        fileSize: params.fileSize,
+        resultSummary: params.resultSummary,
+      });
     }
 
-    console.log("[History:Client] saveHistoryWithFile() ✅ success");
+    console.log("[History:Client] saveHistoryWithFile() ✅ success (uploaded to R2)");
     return true;
   } catch (err) {
-    console.warn("[History:Client] saveHistoryWithFile() error:", err);
-    return false;
+    console.warn("[History:Client] saveHistoryWithFile() error, falling back:", err);
+    // FALLBACK: save as metadata-only
+    return saveHistory({
+      toolId: params.toolId,
+      toolName: params.toolName,
+      fileName: params.fileName,
+      fileSize: params.fileSize,
+      resultSummary: params.resultSummary,
+    });
   }
 }
 

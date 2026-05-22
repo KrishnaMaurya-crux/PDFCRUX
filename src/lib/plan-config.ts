@@ -86,7 +86,7 @@ export function getHistoryLimit(plan: PlanType): number {
 
 /** Format KB to human readable */
 export function formatStorage(kb: number): string {
-  if (kb === 0) return "0 KB";
+  if (kb == null || isNaN(kb) || kb === 0) return "0 KB";
   if (kb < 1024) return `${kb} KB`;
   if (kb < 1024 * 1024) return `${(kb / 1024).toFixed(1)} MB`;
   return `${(kb / (1024 * 1024)).toFixed(1)} GB`;
@@ -97,5 +97,7 @@ export function getStoragePercent(plan: PlanType, storageUsedKB: number): number
   if (IS_DEV_MODE) return 0;
   const config = getPlanConfig(plan);
   if (config.storageLimit === 0) return 0; // unlimited
-  return Math.min(Math.round((storageUsedKB / config.storageLimit) * 100), 100);
+  const safeKB = storageUsedKB ?? 0;
+  if (isNaN(safeKB)) return 0;
+  return Math.min(Math.round((safeKB / config.storageLimit) * 100), 100);
 }
