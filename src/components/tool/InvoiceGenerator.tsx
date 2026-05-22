@@ -251,6 +251,10 @@ export default function InvoiceGenerator() {
         format: [imgWidth, Math.max(imgHeight, 1123)],
       });
       pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
+
+      // Get actual file size from PDF output
+      const pdfOutput = pdf.output('arraybuffer');
+      const fileSize = pdfOutput.byteLength;
       pdf.save(`${invoiceData.invoiceNumber}.pdf`);
 
       toast({ title: "Invoice downloaded!", description: `${invoiceData.invoiceNumber}.pdf` });
@@ -260,7 +264,7 @@ export default function InvoiceGenerator() {
         toolId: "invoice-generator",
         toolName: "Invoice Generator",
         fileName: `${invoiceData.invoiceNumber}.pdf`,
-        fileSize: 0,
+        fileSize,
         resultSummary: `Invoice ${invoiceData.invoiceNumber} — ${formatCurrencyDisplay(currentTotals.total, invoiceData.currency)}`,
       });
     } catch (err) {
@@ -283,6 +287,11 @@ export default function InvoiceGenerator() {
       const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
       const ext = format === "jpeg" ? "jpg" : "png";
       const dataUrl = canvas.toDataURL(mimeType, 0.95);
+
+      // Calculate actual file size from base64 data URL
+      const base64Length = dataUrl.split(',')[1]?.length || 0;
+      const fileSize = Math.round(base64Length * 0.75); // base64 → bytes
+
       const a = document.createElement("a");
       a.href = dataUrl;
       a.download = `${invoiceData.invoiceNumber}.${ext}`;
@@ -295,7 +304,7 @@ export default function InvoiceGenerator() {
         toolId: "invoice-generator",
         toolName: "Invoice Generator",
         fileName: `${invoiceData.invoiceNumber}.${ext}`,
-        fileSize: 0,
+        fileSize,
         resultSummary: `Invoice ${invoiceData.invoiceNumber} as ${format.toUpperCase()}`,
       });
     } catch (err) {
