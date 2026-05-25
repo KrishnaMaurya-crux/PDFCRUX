@@ -41,16 +41,20 @@ export async function GET(req: Request) {
     // For free plan, calculate how many entries to show
     const effectiveHistoryLimit = IS_DEV_MODE ? 0 : getHistoryLimit(plan);
 
+    // Safely handle storageUsed — may be NULL if migration not run yet
+    const rawStorage = user.storageUsed ?? 0;
+    const storageUsed = Math.max(0, Number(rawStorage) || 0);
+
     return NextResponse.json({
       plan,
       planLabel: config.label,
       planPrice: config.price,
-      storageUsed: user.storageUsed,
-      storageUsedFormatted: formatStorage(user.storageUsed),
+      storageUsed,
+      storageUsedFormatted: formatStorage(storageUsed),
       storageLimit: IS_DEV_MODE ? 0 : config.storageLimit,
       storageLimitFormatted: IS_DEV_MODE ? "Unlimited (Dev)" : formatStorage(config.storageLimit),
-      storagePercent: getStoragePercent(plan, user.storageUsed),
-      downloadCount: user.downloadCount,
+      storagePercent: getStoragePercent(plan, storageUsed),
+      downloadCount: user.downloadCount ?? 0,
       downloadLimit: IS_DEV_MODE ? 0 : config.downloadLimit,
       historyCount,
       historyLimit: effectiveHistoryLimit,
