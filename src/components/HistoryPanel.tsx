@@ -25,6 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
   DialogContent,
@@ -179,6 +180,7 @@ function StorageUsageCard({ storage }: { storage: StorageUsage }) {
 export default function HistoryPanel() {
   const { navigateHome, selectTool } = useAppStore();
   const { isLoading: isLoadingAuth, setAuthDialogOpen, session } = useAuthStore();
+  const { toast } = useToast();
 
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -280,6 +282,26 @@ export default function HistoryPanel() {
       const res = await fetch(url, { headers });
       if (!res.ok) {
         console.error("[HistoryPanel] Download failed:", res.status);
+        // Show clear error to user
+        if (res.status === 404) {
+          toast({
+            title: "File not available",
+            description: "This file was not stored in cloud storage. Please process the file again to re-download.",
+            variant: "destructive",
+          });
+        } else if (res.status === 401) {
+          toast({
+            title: "Session expired",
+            description: "Please sign in again to download files.",
+            variant: "destructive",
+          });
+        } else {
+          toast({
+            title: "Download failed",
+            description: `Something went wrong (${res.status}). Please try again.`,
+            variant: "destructive",
+          });
+        }
         return;
       }
 
@@ -294,6 +316,11 @@ export default function HistoryPanel() {
       URL.revokeObjectURL(blobUrl);
     } catch (err) {
       console.error("[HistoryPanel] Download error:", err);
+      toast({
+        title: "Download failed",
+        description: "Network error. Please check your connection and try again.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -495,6 +522,11 @@ export default function HistoryPanel() {
                             {hasFile && (
                               <Badge variant="secondary" className="text-[10px] rounded-full px-1.5 py-0 bg-emerald-50 text-emerald-700 border-0 dark:bg-emerald-900/30 dark:text-emerald-400">
                                 Cloud stored
+                              </Badge>
+                            )}
+                            {!hasFile && (
+                              <Badge variant="secondary" className="text-[10px] rounded-full px-1.5 py-0 bg-amber-50 text-amber-700 border-0 dark:bg-amber-900/30 dark:text-amber-400">
+                                Not stored
                               </Badge>
                             )}
                             {entry.downloaded && (
