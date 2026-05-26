@@ -112,6 +112,7 @@ export async function POST(req: Request) {
 
     const r2 = await getR2Helpers();
     if (r2) {
+      console.log("[Storage:Upload] R2 helpers loaded, bucket:", process.env.R2_BUCKET_NAME);
       try {
         const fileBuffer = Buffer.from(await file.arrayBuffer());
         r2Key = r2.generateFileKey("uploads", fileName);
@@ -120,13 +121,17 @@ export async function POST(req: Request) {
         const uploadResult = await r2.uploadToR2(fileBuffer, r2Key, file.type || "application/octet-stream");
         fileUrl = uploadResult.url;
 
-        console.log("[Storage:Upload] ✅ R2 upload success:", r2Key);
+        console.log("[Storage:Upload] ✅ R2 upload success:", r2Key, "size:", uploadResult.size);
       } catch (r2Err) {
         const msg = r2Err instanceof Error ? r2Err.message : String(r2Err);
-        console.warn("[Storage:Upload] ⚠️ R2 upload failed:", msg);
+        const name = r2Err instanceof Error ? r2Err.name : "UnknownError";
+        console.error("[Storage:Upload] ❌ R2 upload failed:", name, msg);
+        // Also return error info so client can see it
         r2Key = null;
         fileUrl = null;
       }
+    } else {
+      console.warn("[Storage:Upload] ⚠️ R2 not configured — env vars missing");
     }
 
     if (!r2Key) {
