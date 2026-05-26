@@ -40,13 +40,13 @@ import {
   deleteHistoryItem,
   getStorageUsage,
   getDownloadUrl,
-  getAuthHeaders,
   type HistoryEntry,
   type StorageUsage,
   getToolMeta,
   formatHistoryDate,
   formatFileSize,
 } from "@/lib/history";
+import { supabase } from "@/lib/supabase";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants & Tool Icon Mapping
@@ -271,7 +271,10 @@ export default function HistoryPanel() {
     // CRITICAL FIX: window.open() does NOT send Authorization headers.
     // The download API route requires auth, so we must use fetch + blob.
     try {
-      const headers = await getAuthHeaders();
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = session?.access_token
+        ? { Authorization: `Bearer ${session.access_token}` }
+        : {};
       const url = getDownloadUrl(entry.id);
 
       const res = await fetch(url, { headers });
