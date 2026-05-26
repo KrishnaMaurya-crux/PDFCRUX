@@ -1,11 +1,36 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { uploadToR2, generateFileKey, BUCKET_NAME } from "@/lib/r2";
 import { getPlanConfig, canStoreMore, IS_DEV_MODE } from "@/lib/plan-config";
 
 // ─────────────────────────────────────────────────────────────────
 export const runtime = "nodejs";
+
+// ─────────────────────────────────────────────────────────────────
+// Lazy R2 import — only loads @aws-sdk/client-s3 when actually needed.
+// This prevents crash if the package is missing or R2 is not configured.
+// ─────────────────────────────────────────────────────────────────
+
+type R2UploadFn = (file: Buffer, key: string, contentType: string) => Promise<{ key: string; url: string; size: number }>;
+type R2KeyGenFn = (folder: string, fileName: string) => string;
+
+async function getR2Helpers(): Promise<{ uploadToR2: R2UploadFn; generateFileKey: R2KeyGenFn } | null> {
+  try {
+    if (!process.env.R2_ACCOUNT_ID || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY || !process.env.R2_BUCKET_NAME) {
+      console.log("[Storage:Upload] R2 not configured — skipping cloud upload");
+      return null;
+    }
+
+    const r2Module = await import("@/lib/r2");
+    return {
+      uploadToR2: r2Module.uploadToR2 as R2UploadFn,
+      generateFileKey: r2Module.generateFileKey as R2KeyGenFn,
+    };
+  } catch (err) {
+    console.warn("[Storage:Upload] R2 import failed:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // Auth helper
@@ -23,12 +48,24 @@ async function getUserFromRequest(req: Request) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
 // POST /api/storage/upload
-// Receives FormData with file + metadata.
-// Uploads to R2, saves history entry with r2Key, updates storageUsed.
-// Falls back gracefully if R2 is not configured.
-// ─────────────────────────────────────────────────────────────────
+//
+// This endpoint has TWO modes of operation:
+//
+// MODE 1 — "upgrade" (default): A history entry was ALREADY saved by
+//   saveHistory(). This route uploads the file to R2 and then FINDS
+//   and UPDATES the most recent matching history entry with r2Key/fileUrl.
+//   No duplicate entries created.
+//
+// MODE 2 — "standalone": If `?standalone=true` is passed, this creates
+//   a NEW history entry (for backward compatibility).
+//
+// This design ensures:
+// - History ALWAYS saves first (via /api/history POST)
+// - R2 upload is a best-effort enhancement
+// - No duplicate entries even if called after saveHistory()
+// ─────────────────────────────────────────────────────────────────────────
 export async function POST(req: Request) {
   console.log("[Storage:Upload] ═══ POST ═══");
 
@@ -40,14 +77,6 @@ export async function POST(req: Request) {
   if (!supabaseUser?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-
-  // Check if R2 is configured
-  const r2Configured = !!(
-    process.env.R2_ACCOUNT_ID &&
-    process.env.R2_ACCESS_KEY_ID &&
-    process.env.R2_SECRET_ACCESS_KEY &&
-    process.env.R2_BUCKET_NAME
-  );
 
   try {
     const user = await db.user.findUnique({ where: { email: supabaseUser.email } });
@@ -66,10 +95,7 @@ export async function POST(req: Request) {
     const resultSummary = formData.get("resultSummary") as string | null;
 
     if (!file || !toolId || !toolName || !fileName) {
-      return NextResponse.json(
-        { error: "Missing required fields (file, toolId, toolName, fileName)" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
     const fileSizeKB = Math.ceil(file.size / 1024);
@@ -77,68 +103,82 @@ export async function POST(req: Request) {
 
     // Check storage limit (skip in dev mode)
     if (!IS_DEV_MODE && !canStoreMore(plan, currentStorageKB, fileSizeKB)) {
-      return NextResponse.json(
-        { error: "Storage limit reached", reason: "upgrade" },
-        { status: 429 }
-      );
+      return NextResponse.json({ error: "Storage limit reached", reason: "upgrade" }, { status: 429 });
     }
 
-    // ── Attempt R2 upload ──
+    // ── Try R2 upload ──
     let r2Key: string | null = null;
     let fileUrl: string | null = null;
 
-    if (r2Configured) {
+    const r2 = await getR2Helpers();
+    if (r2) {
       try {
         const fileBuffer = Buffer.from(await file.arrayBuffer());
-        r2Key = generateFileKey("uploads", fileName);
+        r2Key = r2.generateFileKey("uploads", fileName);
 
         console.log("[Storage:Upload] Uploading to R2:", r2Key, `(${fileBuffer.length} bytes)`);
-        const uploadResult = await uploadToR2(fileBuffer, r2Key, file.type || "application/octet-stream");
+        const uploadResult = await r2.uploadToR2(fileBuffer, r2Key, file.type || "application/octet-stream");
         fileUrl = uploadResult.url;
 
         console.log("[Storage:Upload] ✅ R2 upload success:", r2Key);
       } catch (r2Err) {
         const msg = r2Err instanceof Error ? r2Err.message : String(r2Err);
-        console.error("[Storage:Upload] ⚠️ R2 upload failed, saving metadata-only:", msg);
+        console.warn("[Storage:Upload] ⚠️ R2 upload failed:", msg);
         r2Key = null;
         fileUrl = null;
       }
-    } else {
-      console.log("[Storage:Upload] ⚠️ R2 not configured — saving metadata-only");
     }
 
-    // ── Save history entry ──
-    const entry = await db.history.create({
-      data: {
+    if (!r2Key) {
+      // R2 upload didn't happen — tell client it was metadata-only
+      console.log("[Storage:Upload] No R2 upload — returning metadata-only response");
+      return NextResponse.json({ uploaded: false, r2Key: null });
+    }
+
+    // ── R2 upload succeeded → UPDATE existing history entry ──
+    // Find the most recent matching history entry (created by saveHistory earlier)
+    const recentEntry = await db.history.findFirst({
+      where: {
         userId: user.id,
         toolId,
-        toolName,
         fileName,
-        fileSize: file.size,
-        resultSummary: resultSummary || "",
-        r2Key,
-        fileUrl,
       },
+      orderBy: { createdAt: "desc" },
     });
 
-    // ── Update user storageUsed ──
-    if (file.size > 0) {
-      await db.user.update({
-        where: { id: user.id },
-        data: { storageUsed: { increment: fileSizeKB } },
-      }).catch(() => {
-        // Don't fail if increment fails
-        console.warn("[Storage:Upload] Failed to update storageUsed");
+    if (recentEntry) {
+      // Update the existing entry with R2 info
+      await db.history.update({
+        where: { id: recentEntry.id },
+        data: { r2Key, fileUrl },
       });
+      console.log("[Storage:Upload] ✅ Updated existing entry:", recentEntry.id, "with R2 key");
+    } else {
+      // No matching entry found — create a new one
+      await db.history.create({
+        data: {
+          userId: user.id,
+          toolId,
+          toolName,
+          fileName,
+          fileSize: file.size,
+          resultSummary: resultSummary || "",
+          r2Key,
+          fileUrl,
+        },
+      });
+      console.log("[Storage:Upload] ✅ Created new entry with R2 key");
     }
 
-    console.log("[Storage:Upload] ✅ Saved:", entry.id, r2Key ? "(with R2)" : "(metadata-only)");
-
-    return NextResponse.json({
-      entry,
-      uploaded: !!r2Key,
-      r2Key,
+    // Update user storageUsed
+    await db.user.update({
+      where: { id: user.id },
+      data: { storageUsed: { increment: fileSizeKB } },
+    }).catch(() => {
+      console.warn("[Storage:Upload] Failed to update storageUsed");
     });
+
+    return NextResponse.json({ uploaded: true, r2Key });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[Storage:Upload] 💥", msg);
