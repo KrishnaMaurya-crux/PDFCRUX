@@ -9,6 +9,11 @@ export const runtime = "nodejs";
 // ─────────────────────────────────────────────────────────────────
 // GET /api/storage/usage
 // Returns user's storage stats + plan info
+//
+// FIX: Calculate storageUsed by SUMMING fileSize from history entries.
+// user.storageUsed is a cached value that may be stale (e.g., upload
+// route was missing). Always use the SUM as the source of truth and
+// backfill user.storageUsed so the DB stays in sync.
 // ─────────────────────────────────────────────────────────────────
 export async function GET(req: Request) {
   const authHeader = req.headers.get("Authorization");
@@ -41,9 +46,28 @@ export async function GET(req: Request) {
     // For free plan, calculate how many entries to show
     const effectiveHistoryLimit = IS_DEV_MODE ? 0 : getHistoryLimit(plan);
 
-    // Safely handle storageUsed — may be NULL if migration not run yet
-    const rawStorage = user.storageUsed ?? 0;
-    const storageUsed = Math.max(0, Number(rawStorage) || 0);
+    // ── FIX: Calculate storage from history entries' fileSize SUM ──
+    // This is the source of truth. user.storageUsed is just a cache.
+    const storageAgg = await db.history.aggregate({
+      where: { userId: user.id },
+      _sum: { fileSize: true },
+    });
+    const calculatedStorage = Math.max(0, Number(storageAgg._sum.fileSize ?? 0));
+
+    // Backfill user.storageUsed if it's stale (keeps DB in sync)
+    const cachedStorage = Math.max(0, Number(user.storageUsed ?? 0));
+    if (Math.abs(calculatedStorage - cachedStorage) > 1) {
+      // Difference is more than 1 KB — update the cache
+      await db.user.update({
+        where: { id: user.id },
+        data: { storageUsed: calculatedStorage },
+      }).catch(() => {
+        // Don't fail the whole request if the backfill fails
+      });
+    }
+
+    // Use calculated value as the source of truth
+    const storageUsed = calculatedStorage;
 
     return NextResponse.json({
       plan,
