@@ -43,7 +43,6 @@ import {
 } from "@/lib/pdf-processor";
 import CloudStorageButtons from "@/components/tool/CloudStorageButtons";
 import { saveToGoogleDrive } from "@/lib/google-drive";
-import { saveHistory, saveHistoryWithFile } from "@/lib/history";
 
 
 function formatFileSize(bytes: number): string {
@@ -661,21 +660,10 @@ export default function ToolPage() {
 
     if (result.outputFiles.length === 1) {
       // Single file - download directly
-      const outFile = result.outputFiles[0];
-      downloadBlob(outFile.data, outFile.name);
+      downloadBlob(result.outputFiles[0].data, result.outputFiles[0].name);
       toast({
         title: "Download started!",
-        description: `${outFile.name} (${formatFileSize(outFile.size)})`,
-      });
-      // Upload to R2 + save history
-      const inputName = uploadedFiles.length > 0 ? uploadedFiles[0].name : outFile.name;
-      saveHistoryWithFile({
-        fileData: new Uint8Array(outFile.data),
-        toolId: selectedToolId,
-        toolName: tool?.name || selectedToolId,
-        fileName: outFile.name,
-        fileSize: outFile.size,
-        resultSummary: `${inputName} → ${outFile.name}`,
+        description: `${result.outputFiles[0].name} (${formatFileSize(result.outputFiles[0].size)})`,
       });
     } else {
       // Multiple files - download as ZIP
@@ -683,15 +671,6 @@ export default function ToolPage() {
       toast({
         title: "Download started!",
         description: `ZIP with ${result.outputFiles.length} files`,
-      });
-      // Save to history
-      const totalSize = result.outputFiles.reduce((s, f) => s + f.size, 0);
-      saveHistory({
-        toolId: selectedToolId,
-        toolName: tool?.name || selectedToolId,
-        fileName: `${result.outputFiles.length} files.zip`,
-        fileSize: totalSize,
-        resultSummary: `${result.outputFiles.length} files processed`,
       });
     }
   };

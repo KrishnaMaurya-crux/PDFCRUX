@@ -33,7 +33,6 @@ import {
 } from "@/components/ui/collapsible";
 import { useAppStore } from "@/lib/store";
 import { useToast } from "@/hooks/use-toast";
-import { saveHistory } from "@/lib/history";
 import {
   InvoiceData, InvoiceItem, CURRENCIES, LANGUAGES,
   calculateTotals, getDefaultInvoiceData,
@@ -251,22 +250,9 @@ export default function InvoiceGenerator() {
         format: [imgWidth, Math.max(imgHeight, 1123)],
       });
       pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
-
-      // Get actual file size from PDF output
-      const pdfOutput = pdf.output('arraybuffer');
-      const fileSize = pdfOutput.byteLength;
       pdf.save(`${invoiceData.invoiceNumber}.pdf`);
 
       toast({ title: "Invoice downloaded!", description: `${invoiceData.invoiceNumber}.pdf` });
-      // Save to history
-      const currentTotals = calculateTotals(invoiceData.items, invoiceData.taxPercent, invoiceData.discountPercent, invoiceData.shippingCharge, invoiceData.amountPaid, invoiceData.previousDue);
-      saveHistory({
-        toolId: "invoice-generator",
-        toolName: "Invoice Generator",
-        fileName: `${invoiceData.invoiceNumber}.pdf`,
-        fileSize,
-        resultSummary: `Invoice ${invoiceData.invoiceNumber} — ${formatCurrencyDisplay(currentTotals.total, invoiceData.currency)}`,
-      });
     } catch (err) {
       console.error("PDF generation error:", err);
       toast({ title: "Error", description: `Failed to generate PDF: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
@@ -287,11 +273,6 @@ export default function InvoiceGenerator() {
       const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
       const ext = format === "jpeg" ? "jpg" : "png";
       const dataUrl = canvas.toDataURL(mimeType, 0.95);
-
-      // Calculate actual file size from base64 data URL
-      const base64Length = dataUrl.split(',')[1]?.length || 0;
-      const fileSize = Math.round(base64Length * 0.75); // base64 → bytes
-
       const a = document.createElement("a");
       a.href = dataUrl;
       a.download = `${invoiceData.invoiceNumber}.${ext}`;
@@ -299,14 +280,6 @@ export default function InvoiceGenerator() {
       a.click();
       document.body.removeChild(a);
       toast({ title: `${format.toUpperCase()} downloaded!`, description: `${invoiceData.invoiceNumber}.${ext}` });
-      // Save to history
-      saveHistory({
-        toolId: "invoice-generator",
-        toolName: "Invoice Generator",
-        fileName: `${invoiceData.invoiceNumber}.${ext}`,
-        fileSize,
-        resultSummary: `Invoice ${invoiceData.invoiceNumber} as ${format.toUpperCase()}`,
-      });
     } catch (err) {
       console.error("Image generation error:", err);
       toast({ title: "Error", description: `Failed to generate ${format.toUpperCase()}: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
