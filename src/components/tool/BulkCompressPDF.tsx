@@ -46,7 +46,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAppStore } from "@/lib/store";
 import { useToast } from "@/hooks/use-toast";
-import { saveHistory } from "@/lib/history";
+import { saveHistory, saveHistoryWithFile } from "@/lib/history";
 import {
   runBulkCompression,
   generateZip,
@@ -755,13 +755,22 @@ export default function BulkCompressPDF() {
       });
       // Save to history
       const savings = calculateSavings(totalOriginalSize, totalCompressedSize);
-      saveHistory({
+      const historyParams = {
         toolId: "bulk-compress-pdf",
         toolName: "Bulk Compress PDF",
         fileName: "compressed-pdfs.zip",
-        fileSize: totalCompressedSize,
+        fileSize: zipBlob.size,
         resultSummary: `${completedFiles.length} files compressed, ${savings}% saved`,
-      });
+      };
+      // Step 1: Always save metadata (reliable)
+      const saved = await saveHistory(historyParams);
+      // Step 2: Best-effort R2 upload for cloud download
+      if (saved) {
+        saveHistoryWithFile({
+          fileData: zipBlob,
+          ...historyParams,
+        }).catch(() => {});
+      }
     } catch {
       toast({
         title: "ZIP creation failed",

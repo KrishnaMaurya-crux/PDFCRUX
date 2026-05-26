@@ -43,7 +43,7 @@ import {
 } from "@/lib/pdf-processor";
 import CloudStorageButtons from "@/components/tool/CloudStorageButtons";
 import { saveToGoogleDrive } from "@/lib/google-drive";
-import { saveHistory } from "@/lib/history";
+import { saveHistory, saveHistoryWithFile } from "@/lib/history";
 
 
 function formatFileSize(bytes: number): string {
@@ -442,6 +442,44 @@ export default function ToolPage() {
           title: "Processing complete!",
           description: result.message,
         });
+
+        // ── AUTO-SAVE history immediately after processing ──
+        // STRATEGY: Save metadata FIRST (guaranteed to work via /api/history).
+        // Then best-effort upload to R2 (may fail silently if R2 not configured).
+        // This ensures history ALWAYS saves even if R2/cloud is down.
+        try {
+          const inputName = uploadedFiles.length > 0
+            ? uploadedFiles[0].name
+            : result.outputFiles[0]?.name || selectedToolId;
+          const totalSize = result.outputFiles.reduce((s, f) => s + f.size, 0);
+          const outputFileName = result.outputFiles.length === 1
+            ? result.outputFiles[0].name
+            : `${result.outputFiles.length} files processed`;
+          const historyParams = {
+            toolId: selectedToolId,
+            toolName: tool?.name || selectedToolId,
+            fileName: outputFileName,
+            fileSize: totalSize,
+            resultSummary: `${inputName} → processed successfully`,
+          };
+
+          // STEP 1: Always save metadata history (reliable, no R2 needed)
+          const saved = await saveHistory(historyParams);
+
+          // STEP 2: Best-effort R2 upload (only if history saved + single file)
+          if (saved && result.outputFiles.length === 1) {
+            saveHistoryWithFile({
+              fileData: result.outputFiles[0].data,
+              ...historyParams,
+            }).catch(() => {
+              // R2 upload failed — metadata already saved, so this is fine
+              console.log("[ToolPage] R2 upload skipped (metadata saved)");
+            });
+          }
+        } catch (historyErr) {
+          // Don't let history save failure break the flow
+          console.warn("[ToolPage] History save failed:", historyErr);
+        }
       } else {
         toast({
           title: "Processing failed",
@@ -660,21 +698,12 @@ export default function ToolPage() {
     }
 
     if (result.outputFiles.length === 1) {
-      // Single file - download directly
+      // Single file - download directly (client-side blob, no server needed)
       const outFile = result.outputFiles[0];
       downloadBlob(outFile.data, outFile.name);
       toast({
         title: "Download started!",
         description: `${outFile.name} (${formatFileSize(outFile.size)})`,
-      });
-      // Save to history
-      const inputName = uploadedFiles.length > 0 ? uploadedFiles[0].name : outFile.name;
-      saveHistory({
-        toolId: selectedToolId,
-        toolName: tool?.name || selectedToolId,
-        fileName: outFile.name,
-        fileSize: outFile.size,
-        resultSummary: `${inputName} → ${outFile.name}`,
       });
     } else {
       // Multiple files - download as ZIP
@@ -682,15 +711,6 @@ export default function ToolPage() {
       toast({
         title: "Download started!",
         description: `ZIP with ${result.outputFiles.length} files`,
-      });
-      // Save to history
-      const totalSize = result.outputFiles.reduce((s, f) => s + f.size, 0);
-      saveHistory({
-        toolId: selectedToolId,
-        toolName: tool?.name || selectedToolId,
-        fileName: `${result.outputFiles.length} files.zip`,
-        fileSize: totalSize,
-        resultSummary: `${result.outputFiles.length} files processed`,
       });
     }
   };

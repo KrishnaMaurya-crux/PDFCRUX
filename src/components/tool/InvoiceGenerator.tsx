@@ -33,7 +33,7 @@ import {
 } from "@/components/ui/collapsible";
 import { useAppStore } from "@/lib/store";
 import { useToast } from "@/hooks/use-toast";
-import { saveHistory } from "@/lib/history";
+import { saveHistory, saveHistoryWithFile } from "@/lib/history";
 import {
   InvoiceData, InvoiceItem, CURRENCIES, LANGUAGES,
   calculateTotals, getDefaultInvoiceData,
@@ -251,23 +251,37 @@ export default function InvoiceGenerator() {
         format: [imgWidth, Math.max(imgHeight, 1123)],
       });
       pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
+
+      // Get actual file size from PDF output
+      const pdfOutput = pdf.output('arraybuffer');
+      const fileSize = pdfOutput.byteLength;
       pdf.save(`${invoiceData.invoiceNumber}.pdf`);
 
       toast({ title: "Invoice downloaded!", description: `${invoiceData.invoiceNumber}.pdf` });
-      // Save to history
-      saveHistory({
+      // Save to history — metadata first, then best-effort R2 upload
+      const currentTotals = calculateTotals(invoiceData.items, invoiceData.taxPercent, invoiceData.discountPercent, invoiceData.shippingCharge, invoiceData.amountPaid, invoiceData.previousDue);
+      const invoiceParams = {
         toolId: "invoice-generator",
         toolName: "Invoice Generator",
         fileName: `${invoiceData.invoiceNumber}.pdf`,
-        fileSize: 0,
-        resultSummary: `Invoice ${invoiceData.invoiceNumber} — ${formatCurrencyDisplay(totals.total, invoiceData.currency)}`,
-      });
+        fileSize,
+        resultSummary: `Invoice ${invoiceData.invoiceNumber} — ${formatCurrencyDisplay(currentTotals.total, invoiceData.currency)}`,
+      };
+      // Step 1: Always save metadata (reliable)
+      const saved = await saveHistory(invoiceParams);
+      // Step 2: Best-effort R2 upload for cloud download
+      if (saved) {
+        saveHistoryWithFile({
+          fileData: new Uint8Array(pdfOutput),
+          ...invoiceParams,
+        }).catch(() => {});
+      }
     } catch (err) {
       console.error("PDF generation error:", err);
       toast({ title: "Error", description: `Failed to generate PDF: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
     }
     setIsGenerating(false);
-  }, [invoiceData, toast, captureInvoiceAsCanvas, totals, downloadFormat]);
+  }, [invoiceData, toast, captureInvoiceAsCanvas]);
 
   const handlePrint = useCallback(() => {
     window.print();
@@ -282,6 +296,11 @@ export default function InvoiceGenerator() {
       const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
       const ext = format === "jpeg" ? "jpg" : "png";
       const dataUrl = canvas.toDataURL(mimeType, 0.95);
+
+      // Calculate actual file size from base64 data URL
+      const base64Length = dataUrl.split(',')[1]?.length || 0;
+      const fileSize = Math.round(base64Length * 0.75); // base64 → bytes
+
       const a = document.createElement("a");
       a.href = dataUrl;
       a.download = `${invoiceData.invoiceNumber}.${ext}`;
@@ -294,7 +313,7 @@ export default function InvoiceGenerator() {
         toolId: "invoice-generator",
         toolName: "Invoice Generator",
         fileName: `${invoiceData.invoiceNumber}.${ext}`,
-        fileSize: 0,
+        fileSize,
         resultSummary: `Invoice ${invoiceData.invoiceNumber} as ${format.toUpperCase()}`,
       });
     } catch (err) {
@@ -302,7 +321,7 @@ export default function InvoiceGenerator() {
       toast({ title: "Error", description: `Failed to generate ${format.toUpperCase()}: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
     }
     setIsGenerating(false);
-  }, [invoiceData, toast, captureInvoiceAsCanvas, downloadFormat]);
+  }, [invoiceData, toast, captureInvoiceAsCanvas]);
 
   const handleDownloadAll = useCallback(async () => {
     if (downloadFormat === "pdf") {
