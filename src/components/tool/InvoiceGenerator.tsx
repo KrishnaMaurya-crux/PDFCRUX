@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/collapsible";
 import { useAppStore } from "@/lib/store";
 import { useToast } from "@/hooks/use-toast";
+import { saveHistory } from "@/lib/history";
 import {
   InvoiceData, InvoiceItem, CURRENCIES, LANGUAGES,
   calculateTotals, getDefaultInvoiceData,
@@ -253,12 +254,20 @@ export default function InvoiceGenerator() {
       pdf.save(`${invoiceData.invoiceNumber}.pdf`);
 
       toast({ title: "Invoice downloaded!", description: `${invoiceData.invoiceNumber}.pdf` });
+      // Save to history
+      saveHistory({
+        toolId: "invoice-generator",
+        toolName: "Invoice Generator",
+        fileName: `${invoiceData.invoiceNumber}.pdf`,
+        fileSize: 0,
+        resultSummary: `Invoice ${invoiceData.invoiceNumber} — ${formatCurrencyDisplay(totals.total, invoiceData.currency)}`,
+      });
     } catch (err) {
       console.error("PDF generation error:", err);
       toast({ title: "Error", description: `Failed to generate PDF: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
     }
     setIsGenerating(false);
-  }, [invoiceData, toast, captureInvoiceAsCanvas]);
+  }, [invoiceData, toast, captureInvoiceAsCanvas, totals, downloadFormat]);
 
   const handlePrint = useCallback(() => {
     window.print();
@@ -280,12 +289,20 @@ export default function InvoiceGenerator() {
       a.click();
       document.body.removeChild(a);
       toast({ title: `${format.toUpperCase()} downloaded!`, description: `${invoiceData.invoiceNumber}.${ext}` });
+      // Save to history
+      saveHistory({
+        toolId: "invoice-generator",
+        toolName: "Invoice Generator",
+        fileName: `${invoiceData.invoiceNumber}.${ext}`,
+        fileSize: 0,
+        resultSummary: `Invoice ${invoiceData.invoiceNumber} as ${format.toUpperCase()}`,
+      });
     } catch (err) {
       console.error("Image generation error:", err);
       toast({ title: "Error", description: `Failed to generate ${format.toUpperCase()}: ${err instanceof Error ? err.message : 'Unknown error'}`, variant: "destructive" });
     }
     setIsGenerating(false);
-  }, [invoiceData, toast, captureInvoiceAsCanvas]);
+  }, [invoiceData, toast, captureInvoiceAsCanvas, downloadFormat]);
 
   const handleDownloadAll = useCallback(async () => {
     if (downloadFormat === "pdf") {
