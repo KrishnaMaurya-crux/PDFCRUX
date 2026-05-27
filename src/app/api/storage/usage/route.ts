@@ -1,49 +1,95 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { getPlanConfig, formatStorage, getStoragePercent, getHistoryLimit, IS_DEV_MODE } from "@/lib/plan-config";
 
-// GET /api/storage — get storage usage stats
-export async function GET() {
+// ─────────────────────────────────────────────────────────────────
+export const runtime = "nodejs";
+
+// ─────────────────────────────────────────────────────────────────
+// GET /api/storage/usage
+// Returns user's storage stats + plan info.
+//
+// Storage calculation: Try SUM(fileSize) from history as source of
+// truth. history.fileSize is in BYTES → convert to KB.
+// If aggregate fails, fall back to user.storageUsed (cached KB).
+// ─────────────────────────────────────────────────────────────────
+export async function GET(req: Request) {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!isSupabaseConfigured) {
+    return NextResponse.json({ error: "Not configured" }, { status: 503 });
+  }
+
+  const token = authHeader.slice(7).trim();
   try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
-      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user?.email) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    let localUser = await db.user.findUnique({ where: { email: user.email! } });
-    if (!localUser) {
+    const user = await db.user.findUnique({ where: { email: data.user.email } });
+    if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
-    // Get or create profile
-    let profile = await db.userProfile.findUnique({ where: { userId: localUser.id } });
-    if (!profile) {
-      profile = await db.userProfile.create({ data: { userId: localUser.id } });
+    const plan = (user.plan as "free" | "premium" | "enterprise") || "free";
+    const config = getPlanConfig(plan);
+
+    // Count history entries
+    const historyCount = await db.history.count({ where: { userId: user.id } });
+
+    // For free plan, calculate how many entries to show
+    const effectiveHistoryLimit = IS_DEV_MODE ? 0 : getHistoryLimit(plan);
+
+    // ── Calculate storage ──
+    // Try aggregate from history entries (bytes → KB conversion).
+    // Fall back to user.storageUsed if aggregate fails.
+    let storageUsed = 0;
+    try {
+      const storageAgg = await db.history.aggregate({
+        where: { userId: user.id },
+        _sum: { fileSize: true },
+      });
+      const totalBytes = Math.max(0, Number(storageAgg._sum.fileSize ?? 0));
+      storageUsed = Math.ceil(totalBytes / 1024); // bytes → KB
+
+      // Backfill user.storageUsed if significantly different
+      const cachedStorage = Math.max(0, Number(user.storageUsed ?? 0));
+      if (Math.abs(storageUsed - cachedStorage) > 1) {
+        await db.user.update({
+          where: { id: user.id },
+          data: { storageUsed },
+        }).catch(() => {});
+      }
+    } catch (aggErr) {
+      // Aggregate failed — use cached value from user record
+      console.warn("[Storage:Usage] Aggregate failed, using cached:", aggErr instanceof Error ? aggErr.message : aggErr);
+      storageUsed = Math.max(0, Number(user.storageUsed ?? 0));
     }
 
-    // Calculate total storage used
-    const storageAgg = await db.fileStorage.aggregate({
-      where: { userId: localUser.id },
-      _sum: { fileSize: true },
-      _count: true,
-    });
-
-    const totalUsedBytes = storageAgg._sum.fileSize || 0;
-    const fileCount = storageAgg._count || 0;
-    const storageLimitBytes = profile.storageLimit || 1073741824; // default 1GB
-
     return NextResponse.json({
-      usedBytes: totalUsedBytes,
-      usedMB: parseFloat((totalUsedBytes / (1024 * 1024)).toFixed(2)),
-      limitBytes: storageLimitBytes,
-      limitMB: parseFloat((storageLimitBytes / (1024 * 1024)).toFixed(0)),
-      limitGB: parseFloat((storageLimitBytes / (1024 * 1024 * 1024)).toFixed(2)),
-      fileCount,
-      plan: profile.plan,
-      percentUsed: parseFloat(((totalUsedBytes / storageLimitBytes) * 100).toFixed(1)),
+      plan,
+      planLabel: config.label,
+      planPrice: config.price,
+      storageUsed,
+      storageUsedFormatted: formatStorage(storageUsed),
+      storageLimit: IS_DEV_MODE ? 0 : config.storageLimit,
+      storageLimitFormatted: IS_DEV_MODE ? "Unlimited (Dev)" : formatStorage(config.storageLimit),
+      storagePercent: getStoragePercent(plan, storageUsed),
+      downloadCount: user.downloadCount ?? 0,
+      downloadLimit: IS_DEV_MODE ? 0 : config.downloadLimit,
+      historyCount,
+      historyLimit: effectiveHistoryLimit,
+      features: config.features,
+      isDevMode: IS_DEV_MODE,
     });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[Storage:Usage] 💥", msg);
+    return NextResponse.json({ error: "Failed to get usage", debug: msg }, { status: 500 });
   }
 }
