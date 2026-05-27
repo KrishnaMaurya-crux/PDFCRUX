@@ -52,7 +52,7 @@ const TOOL_META: Record<string, { color: string; bgColor: string; icon: string }
 // Get Bearer token from Supabase session (stored in localStorage)
 // ─────────────────────────────────────────────────────────────────
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
+export async function getAuthHeaders(): Promise<Record<string, string>> {
   try {
     const {
       data: { session },
@@ -123,7 +123,6 @@ export async function saveHistoryWithFile(params: {
   try {
     const headers = await getAuthHeaders();
     if (!headers["Authorization"]) {
-      console.log("[History:Client] saveHistoryWithFile() skipped — not authenticated");
       return false;
     }
 
@@ -147,32 +146,17 @@ export async function saveHistoryWithFile(params: {
     });
 
     if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      console.warn("[History:Client] saveHistoryWithFile() R2 upload failed:", res.status, errData);
-      // FALLBACK: If R2 upload fails (not configured, storage full, etc.),
-      // still save history as metadata-only so user sees activity
-      console.log("[History:Client] → Falling back to metadata-only saveHistory()");
-      return saveHistory({
-        toolId: params.toolId,
-        toolName: params.toolName,
-        fileName: params.fileName,
-        fileSize: params.fileSize,
-        resultSummary: params.resultSummary,
-      });
+      // R2 upload failed — that's OK, metadata was already saved by caller
+      console.log("[History:Client] saveHistoryWithFile() → upload skipped (metadata already saved)");
+      return false;
     }
 
-    console.log("[History:Client] saveHistoryWithFile() ✅ success (uploaded to R2)");
+    console.log("[History:Client] saveHistoryWithFile() ✅ uploaded to R2");
     return true;
   } catch (err) {
-    console.warn("[History:Client] saveHistoryWithFile() error, falling back:", err);
-    // FALLBACK: save as metadata-only
-    return saveHistory({
-      toolId: params.toolId,
-      toolName: params.toolName,
-      fileName: params.fileName,
-      fileSize: params.fileSize,
-      resultSummary: params.resultSummary,
-    });
+    // Network error or similar — metadata was already saved by caller
+    console.warn("[History:Client] saveHistoryWithFile() error:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
