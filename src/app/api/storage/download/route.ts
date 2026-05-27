@@ -1,8 +1,16 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { downloadFromR2 } from "@/lib/r2";
 import { canDownloadMore, IS_DEV_MODE } from "@/lib/plan-config";
+
+// ─────────────────────────────────────────────────────────────────
+// Lazy R2 import — don't crash the route if @aws-sdk is missing
+// or R2 env vars are wrong. Eager import would crash at module load.
+// ─────────────────────────────────────────────────────────────────
+async function downloadFromR2(key: string): Promise<Buffer> {
+  const r2 = await import("@/lib/r2");
+  return r2.downloadFromR2(key);
+}
 
 // ─────────────────────────────────────────────────────────────────
 export const runtime = "nodejs";
