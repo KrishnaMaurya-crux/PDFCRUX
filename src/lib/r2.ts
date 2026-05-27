@@ -1,4 +1,5 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 // Cloudflare R2 is S3-compatible — we use AWS SDK to interact with it.
 // All credentials are read from environment variables.
@@ -145,4 +146,31 @@ export function generateFileKey(
   return `${folder}/${yearMonth}/${timestamp}_${randomId}.${ext}`;
 }
 
+/**
+ * Generate a presigned PUT URL for direct client-to-R2 upload.
+ * This bypasses Vercel's 4.5MB body limit!
+ * The client uploads directly to R2 using this URL.
+ */
+export async function getPresignedUploadUrl(
+  key: string,
+  contentType: string = "application/octet-stream",
+  expiresIn: number = 300 // 5 minutes
+): Promise<string> {
+  const command = new PutObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+    ContentType: contentType,
+  });
+
+  const url = await getSignedUrl(r2Client, command, { expiresIn });
+  return url;
+}
+
+// Named exports
 export { r2Client, BUCKET_NAME };
+
+// Alias for profile/photo route compatibility
+export { BUCKET_NAME as R2_BUCKET };
+
+// Default export for `import r2Client from "@/lib/r2"` syntax
+export default r2Client;

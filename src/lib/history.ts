@@ -108,8 +108,16 @@ export async function saveHistory(params: {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Save history WITH file upload to R2
-// Use this for tools that produce downloadable files
+// Save history WITH file upload to R2 (using PRESIGNED URL)
+//
+// OLD approach (BROKEN on Vercel): POST file to /api/storage/upload
+//   → Vercel body limit = 4.5MB → 413 error for larger files ❌
+//
+// NEW approach: 
+//   1. POST /api/storage/presign → get a presigned PUT URL (tiny JSON)
+//   2. PUT file DIRECTLY to R2 using presigned URL (no Vercel in path)
+//   3. POST /api/storage/confirm → update history with r2Key
+//   This works for ANY file size — Vercel never sees the file bytes! ✅
 // ─────────────────────────────────────────────────────────────────
 
 export async function saveHistoryWithFile(params: {
@@ -123,38 +131,86 @@ export async function saveHistoryWithFile(params: {
   try {
     const headers = await getAuthHeaders();
     if (!headers["Authorization"]) {
+      console.log("[History:Client] saveHistoryWithFile() skipped — not authenticated");
       return false;
     }
 
-    console.log("[History:Client] saveHistoryWithFile() →", params.fileName);
+    console.log("[History:Client] saveHistoryWithFile() →", params.fileName, `(${params.fileSize} bytes)`);
 
-    // Create FormData
+    // Detect content type from file extension
+    const ext = params.fileName.split(".").pop()?.toLowerCase() || "";
+    const contentTypes: Record<string, string> = {
+      pdf: "application/pdf",
+      zip: "application/zip",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+    };
+    const contentType = contentTypes[ext] || "application/octet-stream";
+
+    // ── STEP 1: Get presigned URL from server (tiny JSON request) ──
+    const presignRes = await fetch("/api/storage/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({
+        fileName: params.fileName,
+        contentType,
+      }),
+    });
+
+    if (!presignRes.ok) {
+      console.warn("[History:Client] Presign failed:", presignRes.status);
+      return false;
+    }
+
+    const { uploadUrl, r2Key } = await presignRes.json();
+    if (!uploadUrl || !r2Key) {
+      console.warn("[History:Client] No presigned URL returned");
+      return false;
+    }
+
+    console.log("[History:Client] Presigned URL obtained, uploading directly to R2...");
+
+    // ── STEP 2: Upload file DIRECTLY to R2 (bypasses Vercel entirely!) ──
     const file = params.fileData instanceof Blob
       ? params.fileData
       : new Blob([params.fileData]);
-    const formData = new FormData();
-    formData.append("file", file, params.fileName);
-    formData.append("toolId", params.toolId);
-    formData.append("toolName", params.toolName);
-    formData.append("fileName", params.fileName);
-    formData.append("resultSummary", params.resultSummary);
 
-    const res = await fetch("/api/storage/upload", {
-      method: "POST",
-      headers, // No Content-Type — browser sets it with boundary for FormData
-      body: formData,
+    const uploadRes = await fetch(uploadUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": contentType },
     });
 
-    if (!res.ok) {
-      // R2 upload failed — that's OK, metadata was already saved by caller
-      console.log("[History:Client] saveHistoryWithFile() → upload skipped (metadata already saved)");
+    if (!uploadRes.ok) {
+      console.warn("[History:Client] Direct R2 upload failed:", uploadRes.status);
       return false;
     }
 
-    console.log("[History:Client] saveHistoryWithFile() ✅ uploaded to R2");
+    console.log("[History:Client] ✅ File uploaded directly to R2:", r2Key);
+
+    // ── STEP 3: Confirm upload — update history entry with r2Key ──
+    const confirmRes = await fetch("/api/storage/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({
+        r2Key,
+        toolId: params.toolId,
+        fileName: params.fileName,
+      }),
+    });
+
+    if (!confirmRes.ok) {
+      console.warn("[History:Client] Confirm failed:", confirmRes.status, "— but file IS in R2:", r2Key);
+      return false;
+    }
+
+    console.log("[History:Client] ✅ History updated with R2 key:", r2Key);
     return true;
   } catch (err) {
-    // Network error or similar — metadata was already saved by caller
     console.warn("[History:Client] saveHistoryWithFile() error:", err instanceof Error ? err.message : err);
     return false;
   }
