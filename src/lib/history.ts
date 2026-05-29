@@ -6,22 +6,26 @@
  *
  * FILE UPLOAD STRATEGY:
  * ─────────────────────
- * Presigned URL — browser uploads DIRECTLY to R2.
+ * Chunked upload through /api/storage/upload (server → R2).
+ *
+ * WHY NOT presigned URLs?
+ *   Presigned URLs require R2 CORS to be configured perfectly.
+ *   Cloudflare R2's CORS preflight handling is unreliable across
+ *   different bucket configurations and SDK versions. After multiple
+ *   failed attempts (AWS SDK checksum headers, path-style URLs,
+ *   x-id parameter stripping), chunked upload through our API is
+ *   the most reliable approach.
  *
  * Flow:
- *   1. POST /api/storage/presign → get presigned PUT URL + r2Key
- *   2. PUT file directly to R2 (bypasses Vercel's 4.5MB limit entirely!)
- *   3. POST /api/storage/confirm → update history with r2Key
+ *   1. Split file into 2MB chunks (each chunk ≈ 2.7MB base64)
+ *   2. POST each chunk to /api/storage/upload as base64 JSON
+ *   3. Server stores chunks as R2 temp objects (stateless-safe!)
+ *   4. Last chunk triggers server-side reassembly into final R2 file
+ *   5. Server updates history entry with r2Key
+ *   6. Temp chunks are auto-deleted
  *
- * Requirements:
- *   - R2 bucket must have CORS enabled (AllowedOrigins: ["*"], AllowedMethods: ["PUT"])
- *   - @aws-sdk/s3-request-presigner package installed
- *
- * Why this approach?
- *   - Vercel serverless has 4.5MB body limit → can't send files through API
- *   - Presigned URLs bypass Vercel entirely — file goes straight from browser to R2
- *   - Works for files of ANY size (1MB, 10MB, 100MB — doesn't matter)
- *   - No chunking, no base64, no FormData — just a simple PUT request
+ * Vercel limits: 4.5MB body per request.
+ * 2MB chunk → ~2.7MB base64 + JSON overhead ≈ 2.8MB. Safe! ✅
  */
 
 import { supabase } from "./supabase";
@@ -85,6 +89,19 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Helper: Convert Uint8Array to base64 (works in browser)
+// ─────────────────────────────────────────────────────────────────
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, bytes.length))));
+  }
+  return btoa(chunks.join(""));
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Save history entry (metadata only — no file)
 // ─────────────────────────────────────────────────────────────────
 
@@ -124,12 +141,24 @@ export async function saveHistory(params: {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Save history WITH file upload to R2 — Presigned URL approach
+// Save history WITH file upload to R2 — Chunked upload approach
 //
-// STEP 1: POST /api/storage/presign → get presigned PUT URL + r2Key
-// STEP 2: PUT file DIRECTLY to R2 via presigned URL (browser → R2, no Vercel!)
-// STEP 3: POST /api/storage/confirm → update history entry with r2Key
+// HOW IT WORKS:
+//   1. Convert file to Uint8Array
+//   2. Split into 2MB chunks
+//   3. POST each chunk to /api/storage/upload as base64
+//   4. Server stores chunks in R2 temp objects (stateless-safe)
+//   5. Last chunk → server reassembles all chunks → final R2 file
+//   6. Server updates history with r2Key, cleans up temp files
+//
+// WHY CHUNKS?
+//   Vercel serverless has 4.5MB body limit.
+//   2MB chunk → ~2.7MB base64 + JSON overhead ≈ 2.8MB. Safe!
+//   Chunks are stored in R2 (shared), not memory (stateless-safe).
+//   R2 GET is strongly consistent, so reassembly always works.
 // ─────────────────────────────────────────────────────────────────
+
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
 
 export async function saveHistoryWithFile(params: {
   fileData: Uint8Array | Blob;
@@ -146,84 +175,60 @@ export async function saveHistoryWithFile(params: {
       return false;
     }
 
-    console.log("[History:Client] 🚀 Uploading to R2:", params.fileName, `(${params.fileSize} bytes)`);
+    console.log("[History:Client] 🚀 Uploading to R2 via chunks:", params.fileName, `(${params.fileSize} bytes)`);
 
-    // ── STEP 1: Get presigned URL from server ──
-    console.log("[History:Client] Step 1: Getting presigned URL...");
-    const presignRes = await fetch("/api/storage/presign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({
-        fileName: params.fileName,
-        contentType: "application/pdf",
-      }),
-    });
-
-    if (!presignRes.ok) {
-      const errData = await presignRes.json().catch(() => ({}));
-      console.error("[History:Client] ❌ Presign failed:", presignRes.status, errData);
-      return false;
-    }
-
-    const { uploadUrl, r2Key } = await presignRes.json();
-    if (!uploadUrl || !r2Key) {
-      console.error("[History:Client] ❌ Invalid presign response");
-      return false;
-    }
-
-    console.log("[History:Client] ✅ Got presigned URL, r2Key:", r2Key);
-    console.log("[History:Client] 📋 URL format:", uploadUrl.substring(0, 150) + "...");
-    // Verify it's path-style (should contain /BUCKET_NAME/ in path, NOT bucket.account)
-    const isPathStyle = uploadUrl.includes(`/${process.env.NEXT_PUBLIC_R2_BUCKET_NAME || ""}/`) || 
-                         !uploadUrl.split("/")[2]?.includes(".");
-    console.log("[History:Client] 🔍 Path-style?", isPathStyle, "(path-style = CORS works ✅)");
-
-    // ── STEP 2: Upload file DIRECTLY to R2 ──
-    console.log("[History:Client] Step 2: Uploading to R2 directly...");
-
-    let fileBody: Blob | Uint8Array;
+    // Convert to Uint8Array
+    let bytes: Uint8Array;
     if (params.fileData instanceof Blob) {
-      fileBody = params.fileData;
+      bytes = new Uint8Array(await params.fileData.arrayBuffer());
     } else {
-      fileBody = new Blob([params.fileData], { type: "application/pdf" });
+      bytes = params.fileData;
     }
 
-    const uploadRes = await fetch(uploadUrl, {
-      method: "PUT",
-      body: fileBody,
-      // Do NOT set Content-Type header here — presigned URL already has it signed
-    });
+    const totalChunks = Math.ceil(bytes.length / CHUNK_SIZE);
+    const sessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-    if (!uploadRes.ok) {
-      const errText = await uploadRes.text().catch(() => "");
-      console.error("[History:Client] ❌ R2 PUT failed:", uploadRes.status, uploadRes.type, errText);
-      return false;
+    console.log(`[History:Client] 📦 ${totalChunks} chunk(s), sessionId: ${sessionId}`);
+
+    // Upload each chunk sequentially
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, bytes.length);
+      const chunkBytes = bytes.slice(start, end);
+      const chunkBase64 = uint8ToBase64(chunkBytes);
+
+      console.log(`[History:Client] 📤 Chunk ${i + 1}/${totalChunks} (${chunkBytes.length}B raw → ${chunkBase64.length}B base64)`);
+
+      const res = await fetch("/api/storage/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({
+          sessionId,
+          chunkIndex: i,
+          totalChunks,
+          chunk: chunkBase64,
+          fileName: params.fileName,
+          toolId: params.toolId,
+          toolName: params.toolName,
+          resultSummary: params.resultSummary,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        console.error(`[History:Client] ❌ Chunk ${i + 1}/${totalChunks} failed:`, res.status, errData);
+        return false;
+      }
+
+      const result = await res.json();
+      if (result.uploaded) {
+        console.log(`[History:Client] 🎉 All ${totalChunks} chunks uploaded! r2Key: ${result.r2Key}`);
+      } else {
+        console.log(`[History:Client] ✅ Chunk ${i + 1}/${totalChunks} stored (${result.ok ? "ok" : "?"})`);
+      }
     }
 
-    console.log("[History:Client] ✅ File uploaded to R2!");
-
-    // ── STEP 3: Confirm upload — update history with r2Key ──
-    console.log("[History:Client] Step 3: Confirming upload...");
-    const confirmRes = await fetch("/api/storage/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({
-        r2Key,
-        toolId: params.toolId,
-        fileName: params.fileName,
-        fileSize: params.fileSize,
-      }),
-    });
-
-    if (!confirmRes.ok) {
-      const errData = await confirmRes.json().catch(() => ({}));
-      console.warn("[History:Client] ⚠️ Confirm failed:", confirmRes.status, errData);
-      // File IS on R2, just history not updated — still success
-    } else {
-      console.log("[History:Client] ✅ Upload confirmed!");
-    }
-
-    console.log("[History:Client] 🎉 Upload complete:", r2Key);
+    console.log("[History:Client] ✅ Upload complete!");
     return true;
   } catch (err) {
     console.error("[History:Client] saveHistoryWithFile() error:", err instanceof Error ? err.message : err);
