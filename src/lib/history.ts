@@ -172,6 +172,11 @@ export async function saveHistoryWithFile(params: {
     }
 
     console.log("[History:Client] ✅ Got presigned URL, r2Key:", r2Key);
+    console.log("[History:Client] 📋 URL format:", uploadUrl.substring(0, 150) + "...");
+    // Verify it's path-style (should contain /BUCKET_NAME/ in path, NOT bucket.account)
+    const isPathStyle = uploadUrl.includes(`/${process.env.NEXT_PUBLIC_R2_BUCKET_NAME || ""}/`) || 
+                         !uploadUrl.split("/")[2]?.includes(".");
+    console.log("[History:Client] 🔍 Path-style?", isPathStyle, "(path-style = CORS works ✅)");
 
     // ── STEP 2: Upload file DIRECTLY to R2 ──
     console.log("[History:Client] Step 2: Uploading to R2 directly...");

@@ -22,7 +22,14 @@ const r2Client = new S3Client({
     accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
   },
-  // CRITICAL: Disable auto checksums — R2 presigned URLs break with them
+  // CRITICAL FIX 1: Force path-style URLs
+  // Without this, presigned URLs look like: https://BUCKET.account.r2.../key
+  // With this, they look like: https://account.r2.../BUCKET/key
+  // Path-style is REQUIRED for R2 CORS to work properly with presigned PUT from browser!
+  forcePathStyle: true,
+  // CRITICAL FIX 2: Disable auto checksums
+  // AWS SDK v3 adds x-amz-checksum-crc32 query params by default.
+  // R2's CORS doesn't handle these extra query params in preflight.
   requestChecksumCalculation: "WHEN_REQUIRED",
 });
 
