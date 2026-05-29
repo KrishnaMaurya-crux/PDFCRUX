@@ -72,6 +72,7 @@ export async function POST(req: Request) {
     const uploadUrl = await r2.getPresignedUploadUrl(r2Key, contentType || "application/octet-stream");
 
     console.log("[Storage:Presign] Generated presigned URL for:", r2Key);
+    console.log("[Storage:Presign] URL preview:", uploadUrl.substring(0, 120) + "...");
 
     return NextResponse.json({ uploadUrl, r2Key });
   } catch (err) {
