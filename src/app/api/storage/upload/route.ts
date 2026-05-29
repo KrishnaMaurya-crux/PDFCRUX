@@ -13,18 +13,21 @@ export const runtime = "nodejs";
 //
 // MODE 1 — Chunked (large files):
 //   { sessionId, chunk (base64), chunkIndex, totalChunks, toolId, ... }
-//   Client splits file into 3MB chunks, sends each POST.
-//   On last chunk, server reassembles + uploads to R2.
+//   Each chunk is stored as a TEMP R2 object: temp/{sessionId}/{index}
+//   On last chunk: all temps are downloaded, combined, final uploaded, temps deleted.
+//   This is STATELESS — works across multiple Vercel instances!
 //
-// MODE 2 — Single-shot (small files < 3MB):
+// MODE 2 — Single-shot (small files < 2MB):
 //   { fileBase64, toolId, toolName, fileName, fileSize, resultSummary }
 //
-// Both bypass Vercel's 4.5MB body limit because we use JSON
-// with base64 chunks instead of FormData.
+// Both use JSON body (NOT FormData) to stay under Vercel's 4.5MB limit.
 // ─────────────────────────────────────────────────────────────────
 
 type R2UploadFn = (file: Buffer, key: string, contentType: string) => Promise<{ key: string; url: string; size: number }>;
 type R2KeyGenFn = (folder: string, fileName: string) => string;
+type R2ListFn = (prefix?: string, maxKeys?: number) => Promise<{ objects: { key: string; size: number }[] }>;
+type R2DownloadFn = (key: string) => Promise<Buffer>;
+type R2DeleteFn = (key: string) => Promise<void>;
 
 async function getR2Helpers() {
   if (!process.env.R2_ACCOUNT_ID || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY || !process.env.R2_BUCKET_NAME) {
@@ -34,6 +37,9 @@ async function getR2Helpers() {
   return {
     uploadToR2: r2.uploadToR2 as R2UploadFn,
     generateFileKey: r2.generateFileKey as R2KeyGenFn,
+    listFromR2: r2.listFromR2 as R2ListFn,
+    downloadFromR2: r2.downloadFromR2 as R2DownloadFn,
+    deleteFromR2: r2.deleteFromR2 as R2DeleteFn,
   };
 }
 
@@ -45,9 +51,6 @@ async function getUser(req: Request) {
     return (error || !data.user) ? null : data.user;
   } catch { return null; }
 }
-
-// Chunk storage (server-side)
-const chunks = new Map<string, Buffer[]>();
 
 export async function POST(req: Request) {
   if (!isSupabaseConfigured) return NextResponse.json({ error: "Not configured" }, { status: 503 });
@@ -63,27 +66,59 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
 
-    // ── CHUNKED MODE ──
+    // ── CHUNKED MODE — stateless (chunks stored in R2 temp objects) ──
     if (body.sessionId && body.chunk !== undefined) {
-      const buf = Buffer.from(body.chunk, "base64");
-      if (!chunks.has(body.sessionId)) chunks.set(body.sessionId, []);
-      const arr = chunks.get(body.sessionId)!;
-      arr[body.chunkIndex] = buf;
+      const r2 = await getR2Helpers();
 
-      console.log(`[Upload] Chunk ${body.chunkIndex + 1}/${body.totalChunks} (${buf.length}B)`);
-
-      if (body.chunkIndex === body.totalChunks - 1) {
-        const full = Buffer.concat(arr);
-        chunks.delete(body.sessionId);
-        return await finishUpload(user, plan, body, full);
+      if (!r2) {
+        return NextResponse.json({ error: "R2 not configured" }, { status: 503 });
       }
+
+      const buf = Buffer.from(body.chunk, "base64");
+      const tempKey = `temp/${body.sessionId}/${body.chunkIndex}`;
+
+      console.log(`[Upload] Chunk ${body.chunkIndex + 1}/${body.totalChunks} → temp R2: ${tempKey} (${buf.length}B)`);
+
+      // Store chunk as temp R2 object (stateless — survives across Vercel instances!)
+      await r2.uploadToR2(buf, tempKey, "application/octet-stream");
+
+      // If this is the LAST chunk, combine all and upload final file
+      if (body.chunkIndex === body.totalChunks - 1) {
+        console.log(`[Upload] Last chunk received! Combining ${body.totalChunks} chunks...`);
+
+        const tempPrefix = `temp/${body.sessionId}/`;
+        const tempObjects = await r2.listFromR2(tempPrefix, body.totalChunks + 10);
+
+        // Sort by chunk index (extracted from key)
+        const sortedObjects = tempObjects.objects.sort((a, b) => {
+          const idxA = parseInt(a.key.split("/").pop() || "0");
+          const idxB = parseInt(b.key.split("/").pop() || "0");
+          return idxA - idxB;
+        });
+
+        // Download all chunks, delete temp objects, concatenate
+        const buffers: Buffer[] = [];
+        for (const obj of sortedObjects) {
+          const data = await r2.downloadFromR2(obj.key);
+          buffers.push(data);
+          // Clean up temp object
+          await r2.deleteFromR2(obj.key).catch(() => {});
+        }
+
+        const full = Buffer.concat(buffers);
+        console.log(`[Upload] ✅ Combined ${buffers.length} chunks → ${full.length} bytes`);
+
+        return await finishUpload(user, plan, body, full, r2);
+      }
+
       return NextResponse.json({ ok: true, chunk: body.chunkIndex });
     }
 
     // ── SINGLE-SHOT MODE ──
     if (body.fileBase64) {
       const buf = Buffer.from(body.fileBase64, "base64");
-      return await finishUpload(user, plan, body, buf);
+      const r2 = await getR2Helpers();
+      return await finishUpload(user, plan, body, buf, r2);
     }
 
     return NextResponse.json({ error: "No data" }, { status: 400 });
@@ -94,7 +129,13 @@ export async function POST(req: Request) {
   }
 }
 
-async function finishUpload(user: { id: string; storageUsed?: number }, plan: string, body: Record<string, unknown>, buf: Buffer) {
+async function finishUpload(
+  user: { id: string; storageUsed?: number },
+  plan: string,
+  body: Record<string, unknown>,
+  buf: Buffer,
+  r2: { uploadToR2: R2UploadFn; generateFileKey: R2KeyGenFn } | null
+) {
   const { toolId, toolName, fileName, fileSize, resultSummary } = body as {
     toolId: string; toolName: string; fileName: string; fileSize?: number; resultSummary?: string;
   };
@@ -105,20 +146,21 @@ async function finishUpload(user: { id: string; storageUsed?: number }, plan: st
     return NextResponse.json({ error: "Storage limit" }, { status: 429 });
   }
 
-  const r2 = await getR2Helpers();
+  if (!r2) {
+    return NextResponse.json({ uploaded: false, r2Key: null, error: "R2 not configured" });
+  }
+
   let r2Key: string | null = null;
   let fileUrl: string | null = null;
 
-  if (r2) {
-    try {
-      r2Key = r2.generateFileKey("uploads", fileName);
-      const res = await r2.uploadToR2(buf, r2Key, "application/pdf");
-      fileUrl = res.url;
-      console.log("[Upload] ✅ R2:", r2Key, `(${buf.length}B)`);
-    } catch (e) {
-      console.error("[Upload] ❌ R2 failed:", e instanceof Error ? e.message : e);
-      r2Key = null;
-    }
+  try {
+    r2Key = r2.generateFileKey("uploads", fileName);
+    const res = await r2.uploadToR2(buf, r2Key, "application/pdf");
+    fileUrl = res.url;
+    console.log("[Upload] ✅ R2:", r2Key, `(${buf.length}B)`);
+  } catch (e) {
+    console.error("[Upload] ❌ R2 failed:", e instanceof Error ? e.message : e);
+    r2Key = null;
   }
 
   if (!r2Key) return NextResponse.json({ uploaded: false, r2Key: null });
