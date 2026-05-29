@@ -5,6 +5,16 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 // All credentials are read from environment variables.
 // NEVER hardcode credentials in source code.
 
+// ─────────────────────────────────────────────────────────────────
+// IMPORTANT: Disable automatic checksums for R2 compatibility.
+//
+// AWS SDK v3 adds x-amz-checksum-crc32 headers by default.
+// R2's presigned URL validation fails when the browser doesn't send
+// these headers in the PUT request. Setting requestChecksumCalculation
+// to "WHEN_REQUIRED" stops the SDK from adding checksum query params
+// to presigned URLs. This is the KEY fix for CORS presigned uploads.
+// ─────────────────────────────────────────────────────────────────
+
 const r2Client = new S3Client({
   region: "auto",
   endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -12,6 +22,8 @@ const r2Client = new S3Client({
     accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
   },
+  // CRITICAL: Disable auto checksums — R2 presigned URLs break with them
+  requestChecksumCalculation: "WHEN_REQUIRED",
 });
 
 const BUCKET_NAME = process.env.R2_BUCKET_NAME || "pdfcrux";
@@ -150,11 +162,15 @@ export function generateFileKey(
  * Generate a presigned PUT URL for direct client-to-R2 upload.
  * This bypasses Vercel's 4.5MB body limit!
  * The client uploads directly to R2 using this URL.
+ *
+ * IMPORTANT: No checksum headers are added (see S3Client config).
+ * This means the browser's simple PUT request will work without
+ * needing to send x-amz-checksum-* headers.
  */
 export async function getPresignedUploadUrl(
   key: string,
   contentType: string = "application/octet-stream",
-  expiresIn: number = 300 // 5 minutes
+  expiresIn: number = 600 // 10 minutes
 ): Promise<string> {
   const command = new PutObjectCommand({
     Bucket: BUCKET_NAME,
