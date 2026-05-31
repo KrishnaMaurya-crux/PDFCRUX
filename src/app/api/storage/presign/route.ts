@@ -14,7 +14,7 @@ async function getR2Presign() {
   }
   const r2 = await import("@/lib/r2");
   return {
-    getPresignedUploadUrl: r2.getPresignedUploadUrl,
+    generatePresignedPutUrl: r2.generatePresignedPutUrl,
     generateFileKey: r2.generateFileKey,
     BUCKET_NAME: r2.BUCKET_NAME,
   };
@@ -36,8 +36,9 @@ async function getUserFromRequest(req: Request) {
 // ─────────────────────────────────────────────────────────────────────────
 // POST /api/storage/presign
 //
-// Returns a presigned PUT URL that the client can use to upload
-// directly to R2 — bypassing Vercel's 4.5MB body limit.
+// Returns a MANUAL presigned PUT URL for direct client-to-R2 upload.
+// Uses our own AWS4 signing — no AWS SDK middleware, no x-id, no checksums.
+// This is the CORS-SAFE presigned URL approach.
 //
 // Request body (JSON):
 //   { fileName: string, contentType?: string }
@@ -62,16 +63,18 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
-    const { fileName, contentType } = body;
+    const { fileName } = body;
 
     if (!fileName) {
       return NextResponse.json({ error: "Missing fileName" }, { status: 400 });
     }
 
     const r2Key = r2.generateFileKey("uploads", fileName);
-    const uploadUrl = await r2.getPresignedUploadUrl(r2Key, contentType || "application/octet-stream");
 
-    console.log("[Storage:Presign] Generated presigned URL for:", r2Key);
+    // Use MANUAL presigned URL — no AWS SDK, no x-id, no CORS issues
+    const uploadUrl = r2.generatePresignedPutUrl(r2Key, 600);
+
+    console.log("[Storage:Presign] Generated MANUAL presigned URL for:", r2Key);
     console.log("[Storage:Presign] URL preview:", uploadUrl.substring(0, 120) + "...");
 
     return NextResponse.json({ uploadUrl, r2Key });
