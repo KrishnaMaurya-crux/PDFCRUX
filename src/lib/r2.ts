@@ -1,19 +1,9 @@
+import crypto from "crypto";
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 // Cloudflare R2 is S3-compatible — we use AWS SDK to interact with it.
 // All credentials are read from environment variables.
 // NEVER hardcode credentials in source code.
-
-// ─────────────────────────────────────────────────────────────────
-// IMPORTANT: Disable automatic checksums for R2 compatibility.
-//
-// AWS SDK v3 adds x-amz-checksum-crc32 headers by default.
-// R2's presigned URL validation fails when the browser doesn't send
-// these headers in the PUT request. Setting requestChecksumCalculation
-// to "WHEN_REQUIRED" stops the SDK from adding checksum query params
-// to presigned URLs. This is the KEY fix for CORS presigned uploads.
-// ─────────────────────────────────────────────────────────────────
 
 const r2Client = new S3Client({
   region: "auto",
@@ -22,15 +12,7 @@ const r2Client = new S3Client({
     accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
   },
-  // CRITICAL FIX 1: Force path-style URLs
-  // Without this, presigned URLs look like: https://BUCKET.account.r2.../key
-  // With this, they look like: https://account.r2.../BUCKET/key
-  // Path-style is REQUIRED for R2 CORS to work properly with presigned PUT from browser!
   forcePathStyle: true,
-  // CRITICAL FIX 2: Disable auto checksums
-  // AWS SDK v3 adds x-amz-checksum-crc32 query params by default.
-  // R2's CORS doesn't handle these extra query params in preflight.
-  requestChecksumCalculation: "WHEN_REQUIRED",
 });
 
 const BUCKET_NAME = process.env.R2_BUCKET_NAME || "pdfcrux";
@@ -65,7 +47,6 @@ export async function uploadToR2(
 
   const response = await r2Client.send(command);
 
-  // Build public URL if domain is configured
   const url = PUBLIC_DOMAIN ? `${PUBLIC_DOMAIN}/${key}` : `r2://${BUCKET_NAME}/${key}`;
 
   return {
@@ -107,7 +88,6 @@ export async function downloadFromR2(key: string): Promise<Buffer> {
     throw new Error(`Empty response body for key: ${key}`);
   }
 
-  // Convert stream to buffer
   const bytes = await response.Body.transformToByteArray();
   return Buffer.from(bytes);
 }
@@ -165,28 +145,122 @@ export function generateFileKey(
   return `${folder}/${yearMonth}/${timestamp}_${randomId}.${ext}`;
 }
 
-/**
- * Generate a presigned PUT URL for direct client-to-R2 upload.
- * This bypasses Vercel's 4.5MB body limit!
- * The client uploads directly to R2 using this URL.
- *
- * IMPORTANT: No checksum headers are added (see S3Client config).
- * This means the browser's simple PUT request will work without
- * needing to send x-amz-checksum-* headers.
- */
-export async function getPresignedUploadUrl(
-  key: string,
-  contentType: string = "application/octet-stream",
-  expiresIn: number = 600 // 10 minutes
-): Promise<string> {
-  const command = new PutObjectCommand({
-    Bucket: BUCKET_NAME,
-    Key: key,
-    ContentType: contentType,
-  });
+// ─────────────────────────────────────────────────────────────────────────
+// MANUAL PRESIGNED URL GENERATOR
+// ─────────────────────────────────────────────────────────────────────────
+//
+// WHY MANUAL instead of @aws-sdk/s3-request-presigner?
+//
+// AWS SDK v3's presigner adds EXTRA query params that break R2 CORS:
+//   - x-id=PutObject       ← AWS internal routing param, R2 doesn't need it
+//   - x-amz-checksum-crc32 ← auto-checksum, R2 rejects if browser doesn't send header
+//
+// These extra params cause R2's CORS preflight (OPTIONS) to fail because
+// R2's CORS matching gets confused by non-standard query params.
+//
+// Our manual URL has ONLY standard AWS4 signing params — clean, minimal.
+// Combined with sending PUT without Content-Type (no preflight needed),
+// this guarantees CORS-safe direct browser-to-R2 uploads.
+//
+// URL format:
+//   https://ACCOUNT_ID.r2.cloudflarestorage.com/BUCKET/KEY
+//     ?X-Amz-Algorithm=AWS4-HMAC-SHA256
+//     &X-Amz-Credential=ACCESS_KEY/DATE/auto/s3/aws4_request
+//     &X-Amz-Date=20260529T145022Z
+//     &X-Amz-Expires=600
+//     &X-Amz-SignedHeaders=host
+//     &X-Amz-Signature=...
+//     &X-Amz-Content-Sha256=UNSIGNED-PAYLOAD
+//
+// NO x-id, NO checksums, NO garbage. Just pure AWS4 signing.
+// ─────────────────────────────────────────────────────────────────────────
 
-  const url = await getSignedUrl(r2Client, command, { expiresIn });
-  return url;
+/**
+ * Generate a presigned PUT URL MANUALLY using AWS Signature V4.
+ * No AWS SDK middleware — no x-id, no checksums, no extra params.
+ * Clean URL that R2 CORS handles correctly.
+ */
+export function generatePresignedPutUrl(
+  key: string,
+  expiresIn: number = 600 // 10 minutes
+): string {
+  const accountId = process.env.R2_ACCOUNT_ID!;
+  const bucketName = process.env.R2_BUCKET_NAME!;
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID!;
+  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY!;
+
+  const region = "auto";
+  const service = "s3";
+
+  // Build timestamp in AWS format: YYYYMMDDTHHMMSSZ
+  const now = new Date();
+  const year = String(now.getUTCFullYear());
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(now.getUTCDate()).padStart(2, "0");
+  const hour = String(now.getUTCHours()).padStart(2, "0");
+  const minute = String(now.getUTCMinutes()).padStart(2, "0");
+  const second = String(now.getUTCSeconds()).padStart(2, "0");
+  const amzDate = `${year}${month}${day}T${hour}${minute}${second}Z`;
+  const dateStamp = `${year}${month}${day}`;
+
+  // Endpoint and path (path-style: /BUCKET/key)
+  const host = `${accountId}.r2.cloudflarestorage.com`;
+  const canonicalUri = `/${bucketName}/${key}`;
+
+  // Build credential scope
+  const credential = `${accessKeyId}/${dateStamp}/${region}/${service}/aws4_request`;
+
+  // Query params — ONLY standard AWS4 signing params, NO x-id
+  const queryParams: [string, string][] = [
+    ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
+    ["X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"],
+    ["X-Amz-Credential", credential],
+    ["X-Amz-Date", amzDate],
+    ["X-Amz-Expires", String(expiresIn)],
+    ["X-Amz-SignedHeaders", "host"],
+  ];
+
+  // Sort by key (AWS Sig V4 requirement)
+  queryParams.sort((a, b) => a[0].localeCompare(b[0]));
+  const canonicalQueryString = queryParams
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+
+  // Canonical headers — only host
+  const canonicalHeaders = `host:${host}\n`;
+  const signedHeaders = "host";
+
+  // Build canonical request
+  const canonicalRequest = [
+    "PUT",                      // HTTP method
+    canonicalUri,               // Path
+    canonicalQueryString,       // Query string (sorted)
+    canonicalHeaders,           // Headers (must end with \n)
+    signedHeaders,              // Which headers are signed
+    "UNSIGNED-PAYLOAD",         // Content hash
+  ].join("\n");
+
+  // Build string to sign
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    crypto.createHash("sha256").update(canonicalRequest).digest("hex"),
+  ].join("\n");
+
+  // Derive signing key: HMAC chain
+  const kDate = crypto.createHmac("sha256", `AWS4${secretAccessKey}`).update(dateStamp).digest();
+  const kRegion = crypto.createHmac("sha256", kDate).update(region).digest();
+  const kService = crypto.createHmac("sha256", kRegion).update(service).digest();
+  const kSigning = crypto.createHmac("sha256", kService).update("aws4_request").digest();
+
+  // Final signature
+  const signature = crypto.createHmac("sha256", kSigning).update(stringToSign).digest("hex");
+
+  // Build final URL
+  const url = `${canonicalQueryString}&X-Amz-Signature=${signature}`;
+  return `https://${host}${canonicalUri}?${url}`;
 }
 
 // Named exports
