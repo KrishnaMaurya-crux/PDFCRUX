@@ -41,6 +41,7 @@ import {
   deleteHistoryItem,
   getStorageUsage,
   getDownloadUrl,
+  markDownloaded,
   type HistoryEntry,
   type StorageUsage,
   getToolMeta,
@@ -270,9 +271,24 @@ export default function HistoryPanel() {
   };
 
   const handleDownload = async (entry: HistoryEntry) => {
-    // CRITICAL FIX: window.open() does NOT send Authorization headers.
-    // The download API route requires auth, so we must use fetch + blob.
     try {
+      // If fileUrl is a public HTTPS URL, download directly from R2 (no proxy!)
+      if (entry.fileUrl && entry.fileUrl.startsWith("https://")) {
+        console.log("[HistoryPanel] Direct download from:", entry.fileUrl);
+        const a = document.createElement("a");
+        a.href = entry.fileUrl;
+        a.download = entry.fileName || "download";
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Mark as downloaded
+        markDownloaded(entry.id).catch(() => {});
+        return;
+      }
+
+      // Fallback: proxy download through /api/storage/download (auth required)
       const { data: { session } } = await supabase.auth.getSession();
       const headers: Record<string, string> = session?.access_token
         ? { Authorization: `Bearer ${session.access_token}` }
@@ -281,26 +297,12 @@ export default function HistoryPanel() {
 
       const res = await fetch(url, { headers });
       if (!res.ok) {
-        console.error("[HistoryPanel] Download failed:", res.status);
-        // Show clear error to user
         if (res.status === 404) {
-          toast({
-            title: "File not available",
-            description: "This file was not stored in cloud storage. Please process the file again to re-download.",
-            variant: "destructive",
-          });
+          toast({ title: "File not available", description: "Process the file again to re-download.", variant: "destructive" });
         } else if (res.status === 401) {
-          toast({
-            title: "Session expired",
-            description: "Please sign in again to download files.",
-            variant: "destructive",
-          });
+          toast({ title: "Session expired", description: "Please sign in again.", variant: "destructive" });
         } else {
-          toast({
-            title: "Download failed",
-            description: `Something went wrong (${res.status}). Please try again.`,
-            variant: "destructive",
-          });
+          toast({ title: "Download failed", description: `Error (${res.status}). Try again.`, variant: "destructive" });
         }
         return;
       }
@@ -314,13 +316,10 @@ export default function HistoryPanel() {
       a.click();
       a.remove();
       URL.revokeObjectURL(blobUrl);
+      markDownloaded(entry.id).catch(() => {});
     } catch (err) {
       console.error("[HistoryPanel] Download error:", err);
-      toast({
-        title: "Download failed",
-        description: "Network error. Please check your connection and try again.",
-        variant: "destructive",
-      });
+      toast({ title: "Download failed", description: "Network error. Try again.", variant: "destructive" });
     }
   };
 
