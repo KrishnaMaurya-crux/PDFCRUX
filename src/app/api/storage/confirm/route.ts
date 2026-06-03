@@ -8,9 +8,8 @@ export const runtime = "nodejs";
 // ─────────────────────────────────────────────────────────────────
 // POST /api/storage/confirm
 //
-// Called AFTER client uploads file directly to R2 via presigned URL.
-// This updates the most recent matching history entry with r2Key.
-// No file data passes through Vercel — only a tiny JSON with r2Key.
+// Called AFTER client uploads file to R2 (via presigned URL or chunked).
+// Updates the most recent matching history entry with r2Key + public fileUrl.
 // ─────────────────────────────────────────────────────────────────
 
 async function getUserFromRequest(req: Request) {
@@ -49,7 +48,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    // Find the most recent matching history entry and update with r2Key
+    // Build PUBLIC file URL using R2_PUBLIC_DOMAIN
+    const publicDomain = process.env.R2_PUBLIC_DOMAIN || "";
+    const fileUrl = publicDomain
+      ? `${publicDomain}/${r2Key}`
+      : `r2://${process.env.R2_BUCKET_NAME}/${r2Key}`;
+
+    // Find the most recent matching history entry and update
     const recentEntry = await db.history.findFirst({
       where: {
         userId: user.id,
@@ -62,17 +67,14 @@ export async function POST(req: Request) {
     if (recentEntry) {
       await db.history.update({
         where: { id: recentEntry.id },
-        data: {
-          r2Key,
-          fileUrl: `r2://${process.env.R2_BUCKET_NAME}/${r2Key}`,
-        },
+        data: { r2Key, fileUrl },
       });
-      console.log("[Storage:Confirm] ✅ Updated entry:", recentEntry.id, "with r2Key:", r2Key);
+      console.log("[Storage:Confirm] ✅ Updated:", recentEntry.id, "fileUrl:", fileUrl);
     } else {
-      console.log("[Storage:Confirm] ⚠️ No matching history entry found for", { toolId, fileName });
+      console.log("[Storage:Confirm] ⚠️ No matching entry for", { toolId, fileName });
     }
 
-    return NextResponse.json({ success: true, r2Key });
+    return NextResponse.json({ success: true, r2Key, fileUrl });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[Storage:Confirm] 💥", msg);
