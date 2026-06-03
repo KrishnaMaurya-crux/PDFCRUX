@@ -34,11 +34,55 @@ async function getUserFromRequest(req: Request) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Auto-set CORS on R2 bucket using S3 PutBucketCors API.
+// Runs ONCE (first presign call). If CORS is already set, S3 returns 200.
+// This ensures presigned URL uploads work even if user forgot to set CORS.
+// ─────────────────────────────────────────────────────────────────────────
+let corsSetupDone = false;
+
+async function ensureR2CORS() {
+  if (corsSetupDone) return;
+
+  try {
+    const { S3Client, PutBucketCorsCommand } = await import("@aws-sdk/client-s3");
+
+    const s3Client = new S3Client({
+      region: "auto",
+      endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
+      },
+    });
+
+    await s3Client.send(new PutBucketCorsCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            AllowedOrigins: ["*"],
+            AllowedMethods: ["GET", "PUT", "DELETE", "HEAD"],
+            AllowedHeaders: ["*"],
+            ExposeHeaders: ["ETag"],
+            MaxAgeSeconds: 3600,
+          },
+        ],
+      },
+    }));
+
+    corsSetupDone = true;
+    console.log("[Storage:Presign] ✅ CORS auto-configured on R2 bucket");
+  } catch (err) {
+    // Don't block presign if CORS setup fails — chunked fallback will handle it
+    console.warn("[Storage:Presign] ⚠️ CORS auto-setup failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // POST /api/storage/presign
 //
 // Returns a MANUAL presigned PUT URL for direct client-to-R2 upload.
-// Uses our own AWS4 signing — no AWS SDK middleware, no x-id, no checksums.
-// This is the CORS-SAFE presigned URL approach.
+// Auto-sets CORS on first call using S3 PutBucketCors API.
 //
 // Request body (JSON):
 //   { fileName: string, contentType?: string }
@@ -60,6 +104,9 @@ export async function POST(req: Request) {
   if (!r2) {
     return NextResponse.json({ error: "R2 not configured" }, { status: 503 });
   }
+
+  // Auto-set CORS on R2 bucket (runs once, silent if already set)
+  await ensureR2CORS();
 
   try {
     const body = await req.json();
