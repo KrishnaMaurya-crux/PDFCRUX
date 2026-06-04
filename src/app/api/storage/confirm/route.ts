@@ -8,8 +8,15 @@ export const runtime = "nodejs";
 // ─────────────────────────────────────────────────────────────────
 // POST /api/storage/confirm
 //
-// Called AFTER client uploads file to R2 (via presigned URL or chunked).
-// Updates the most recent matching history entry with r2Key + public fileUrl.
+// Called AFTER client uploads file to R2 via presigned PUT URL.
+// Updates the most recent matching history entry with r2Key.
+// Also updates user's storageUsed with the file size.
+//
+// NO R2_PUBLIC_DOMAIN needed — downloads go through /api/storage/download
+// proxy route which fetches directly from R2 using r2Key.
+//
+// Request body:
+//   { r2Key: string, toolId: string, fileName: string, fileSize: number }
 // ─────────────────────────────────────────────────────────────────
 
 async function getUserFromRequest(req: Request) {
@@ -42,17 +49,11 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json();
-    const { r2Key, toolId, fileName } = body;
+    const { r2Key, toolId, fileName, fileSize } = body;
 
     if (!r2Key || !toolId || !fileName) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
-
-    // Build PUBLIC file URL using R2_PUBLIC_DOMAIN
-    const publicDomain = process.env.R2_PUBLIC_DOMAIN || "";
-    const fileUrl = publicDomain
-      ? `${publicDomain}/${r2Key}`
-      : `r2://${process.env.R2_BUCKET_NAME}/${r2Key}`;
 
     // Find the most recent matching history entry and update
     const recentEntry = await db.history.findFirst({
@@ -67,14 +68,30 @@ export async function POST(req: Request) {
     if (recentEntry) {
       await db.history.update({
         where: { id: recentEntry.id },
-        data: { r2Key, fileUrl },
+        data: {
+          r2Key,
+          // Mark as stored — fileUrl is not used for public access.
+          // Download goes through /api/storage/download proxy using r2Key.
+          fileUrl: `r2://${process.env.R2_BUCKET_NAME}/${r2Key}`,
+        },
       });
-      console.log("[Storage:Confirm] ✅ Updated:", recentEntry.id, "fileUrl:", fileUrl);
+      console.log("[Storage:Confirm] ✅ Updated:", recentEntry.id, "r2Key:", r2Key);
     } else {
       console.log("[Storage:Confirm] ⚠️ No matching entry for", { toolId, fileName });
     }
 
-    return NextResponse.json({ success: true, r2Key, fileUrl });
+    // Update user's storageUsed with the file size
+    if (fileSize && fileSize > 0) {
+      await db.user.update({
+        where: { id: user.id },
+        data: {
+          storageUsed: { increment: fileSize },
+        },
+      });
+      console.log("[Storage:Confirm] 📊 Storage +", fileSize, "bytes for user:", user.email);
+    }
+
+    return NextResponse.json({ success: true, r2Key });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[Storage:Confirm] 💥", msg);
