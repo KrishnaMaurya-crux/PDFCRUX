@@ -272,29 +272,15 @@ export default function HistoryPanel() {
 
   const handleDownload = async (entry: HistoryEntry) => {
     try {
-      // If fileUrl is a public HTTPS URL, download directly from R2 (no proxy!)
-      if (entry.fileUrl && entry.fileUrl.startsWith("https://")) {
-        console.log("[HistoryPanel] Direct download from:", entry.fileUrl);
-        const a = document.createElement("a");
-        a.href = entry.fileUrl;
-        a.download = entry.fileName || "download";
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        // Mark as downloaded
-        markDownloaded(entry.id).catch(() => {});
-        return;
-      }
-
-      // Fallback: proxy download through /api/storage/download (auth required)
+      // Always use proxy download through /api/storage/download
+      // This avoids CORS issues — server fetches from R2 and streams to client
       const { data: { session } } = await supabase.auth.getSession();
       const headers: Record<string, string> = session?.access_token
         ? { Authorization: `Bearer ${session.access_token}` }
         : {};
       const url = getDownloadUrl(entry.id);
 
+      console.log("[HistoryPanel] Downloading via proxy:", entry.fileName);
       const res = await fetch(url, { headers });
       if (!res.ok) {
         if (res.status === 404) {
@@ -317,6 +303,7 @@ export default function HistoryPanel() {
       a.remove();
       URL.revokeObjectURL(blobUrl);
       markDownloaded(entry.id).catch(() => {});
+      toast({ title: "Downloaded!", description: `${entry.fileName} saved successfully.`, variant: "default" });
     } catch (err) {
       console.error("[HistoryPanel] Download error:", err);
       toast({ title: "Download failed", description: "Network error. Try again.", variant: "destructive" });
