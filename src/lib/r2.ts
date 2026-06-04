@@ -16,7 +16,6 @@ const r2Client = new S3Client({
 });
 
 const BUCKET_NAME = process.env.R2_BUCKET_NAME || "pdfcrux";
-const PUBLIC_DOMAIN = process.env.R2_PUBLIC_DOMAIN || "";
 
 export interface UploadResult {
   key: string;
@@ -47,11 +46,9 @@ export async function uploadToR2(
 
   const response = await r2Client.send(command);
 
-  const url = PUBLIC_DOMAIN ? `${PUBLIC_DOMAIN}/${key}` : `r2://${BUCKET_NAME}/${key}`;
-
   return {
     key,
-    url,
+    url: `r2://${BUCKET_NAME}/${key}`,
     size: file.byteLength,
     etag: response.ETag,
   };
@@ -259,6 +256,91 @@ export function generatePresignedPutUrl(
   const signature = crypto.createHmac("sha256", kSigning).update(stringToSign).digest("hex");
 
   // Build final URL
+  const url = `${canonicalQueryString}&X-Amz-Signature=${signature}`;
+  return `https://${host}${canonicalUri}?${url}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PRESIGNED GET URL GENERATOR (for temporary download links)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Same manual AWS4 signing approach as PUT — no x-id, no checksums.
+// Used to generate temporary GET URLs that clients can use to download
+// files directly from R2 (if CORS is properly configured).
+//
+// For PdfCrux, downloads go through /api/storage/download proxy route
+// which doesn't need CORS. But this function is available if needed.
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a presigned GET URL MANUALLY using AWS Signature V4.
+ * For temporary direct download links (optional — proxy download is default).
+ */
+export function generatePresignedGetUrl(
+  key: string,
+  expiresIn: number = 600 // 10 minutes
+): string {
+  const accountId = process.env.R2_ACCOUNT_ID!;
+  const bucketName = process.env.R2_BUCKET_NAME!;
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID!;
+  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY!;
+
+  const region = "auto";
+  const service = "s3";
+
+  const now = new Date();
+  const year = String(now.getUTCFullYear());
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(now.getUTCDate()).padStart(2, "0");
+  const hour = String(now.getUTCHours()).padStart(2, "0");
+  const minute = String(now.getUTCMinutes()).padStart(2, "0");
+  const second = String(now.getUTCSeconds()).padStart(2, "0");
+  const amzDate = `${year}${month}${day}T${hour}${minute}${second}Z`;
+  const dateStamp = `${year}${month}${day}`;
+
+  const host = `${accountId}.r2.cloudflarestorage.com`;
+  const canonicalUri = `/${bucketName}/${key}`;
+  const credential = `${accessKeyId}/${dateStamp}/${region}/${service}/aws4_request`;
+
+  const queryParams: [string, string][] = [
+    ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
+    ["X-Amz-Credential", credential],
+    ["X-Amz-Date", amzDate],
+    ["X-Amz-Expires", String(expiresIn)],
+    ["X-Amz-SignedHeaders", "host"],
+  ];
+
+  queryParams.sort((a, b) => a[0].localeCompare(b[0]));
+  const canonicalQueryString = queryParams
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+
+  const canonicalHeaders = `host:${host}\n`;
+  const signedHeaders = "host";
+
+  const canonicalRequest = [
+    "GET",
+    canonicalUri,
+    canonicalQueryString,
+    canonicalHeaders,
+    signedHeaders,
+    "UNSIGNED-PAYLOAD",
+  ].join("\n");
+
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    crypto.createHash("sha256").update(canonicalRequest).digest("hex"),
+  ].join("\n");
+
+  const kDate = crypto.createHmac("sha256", `AWS4${secretAccessKey}`).update(dateStamp).digest();
+  const kRegion = crypto.createHmac("sha256", kDate).update(region).digest();
+  const kService = crypto.createHmac("sha256", kRegion).update(service).digest();
+  const kSigning = crypto.createHmac("sha256", kService).update("aws4_request").digest();
+  const signature = crypto.createHmac("sha256", kSigning).update(stringToSign).digest("hex");
+
   const url = `${canonicalQueryString}&X-Amz-Signature=${signature}`;
   return `https://${host}${canonicalUri}?${url}`;
 }

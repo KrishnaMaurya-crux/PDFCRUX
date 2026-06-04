@@ -1,21 +1,19 @@
 /**
  * History Module — Client-side functions for history management.
  *
- * FILE UPLOAD STRATEGY:
- * ─────────────────────
- * Chunked upload through /api/storage/upload (server → R2).
- * Files split into 2MB chunks → base64 → JSON POST.
- * Server stores in R2 temp objects → reassembles on last chunk.
- * Works for ANY file size, NO CORS needed, NO presigned URLs.
+ * FILE UPLOAD STRATEGY (PRESIGNED URL):
+ * ────────────────────────────────────────
+ * 1. POST /api/storage/presign → get presigned PUT URL + r2Key
+ * 2. Browser PUTs file directly to R2 via presigned URL (no CORS if bucket CORS is set)
+ * 3. POST /api/storage/confirm → update history entry with r2Key
  *
  * DOWNLOAD STRATEGY:
  * ──────────────────
- * If entry.fileUrl starts with https:// → direct download from public R2.
- * Otherwise → proxy download through /api/storage/download (auth required).
+ * Proxy download through /api/storage/download (auth required).
+ * Server fetches from R2 → streams to client. No CORS needed for downloads.
  *
- * VERCEL ENV VARS NEEDED (5 total):
- *   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
- *   R2_BUCKET_NAME, R2_PUBLIC_DOMAIN
+ * VERCEL ENV VARS NEEDED (4 total):
+ *   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
  */
 
 import { supabase } from "./supabase";
@@ -75,19 +73,6 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Helper: Convert Uint8Array to base64
-// ─────────────────────────────────────────────────────────────────
-
-function uint8ToBase64(bytes: Uint8Array): string {
-  const chunks: string[] = [];
-  const chunkSize = 8192;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, bytes.length))));
-  }
-  return btoa(chunks.join(""));
-}
-
-// ─────────────────────────────────────────────────────────────────
 // Save history entry (metadata only — no file)
 // ─────────────────────────────────────────────────────────────────
 
@@ -127,13 +112,15 @@ export async function saveHistory(params: {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Save history WITH file upload to R2 — Chunked upload approach
+// Save history WITH file upload to R2 — PRESIGNED URL APPROACH
 //
-// 2MB chunks → base64 → POST /api/storage/upload
-// Server reassembles → uploads final file to R2 → updates history
+// Step 1: POST /api/storage/presign → get presigned PUT URL + r2Key
+// Step 2: Browser PUTs file directly to R2 via presigned URL
+// Step 3: POST /api/storage/confirm → update history + storageUsed
+//
+// NO chunks, NO base64 encoding, NO server upload proxy.
+// Direct browser-to-R2 upload — clean and fast.
 // ─────────────────────────────────────────────────────────────────
-
-const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
 
 export async function saveHistoryWithFile(params: {
   fileData: Uint8Array | Blob;
@@ -150,57 +137,66 @@ export async function saveHistoryWithFile(params: {
       return false;
     }
 
-    console.log("[History:Client] 🚀 Uploading:", params.fileName, `(${params.fileSize} bytes)`);
+    console.log("[History:Client] 🚀 Presigned URL Upload:", params.fileName, `(${params.fileSize} bytes)`);
 
-    // Convert to Uint8Array
-    let bytes: Uint8Array;
-    if (params.fileData instanceof Blob) {
-      bytes = new Uint8Array(await params.fileData.arrayBuffer());
+    // ── Step 1: Get presigned PUT URL from server ──
+    const presignRes = await fetch("/api/storage/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ fileName: params.fileName }),
+    });
+
+    if (!presignRes.ok) {
+      const errData = await presignRes.json().catch(() => ({}));
+      console.error("[History:Client] ❌ Presign failed:", presignRes.status, errData);
+      return false;
+    }
+
+    const { uploadUrl, r2Key } = await presignRes.json();
+    console.log("[History:Client] 📋 Presigned URL received, r2Key:", r2Key);
+
+    // ── Step 2: Upload file directly to R2 via presigned PUT URL ──
+    // IMPORTANT: Do NOT send Content-Type header to avoid CORS preflight.
+    // PUT without custom headers is a "simple request" in CORS spec.
+    const fileBlob = params.fileData instanceof Blob
+      ? params.fileData
+      : new Blob([params.fileData]);
+
+    console.log("[History:Client] 📤 Uploading to R2 via presigned URL...");
+    const uploadRes = await fetch(uploadUrl, {
+      method: "PUT",
+      body: fileBlob,
+      // NO Content-Type header — prevents CORS preflight
+      // NO Authorization header — signature is in the URL
+    });
+
+    if (!uploadRes.ok) {
+      console.error("[History:Client] ❌ R2 upload failed:", uploadRes.status, uploadRes.statusText);
+      return false;
+    }
+
+    console.log("[History:Client] ✅ File uploaded to R2!");
+
+    // ── Step 3: Confirm upload — update history + storageUsed ──
+    const confirmRes = await fetch("/api/storage/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({
+        r2Key,
+        toolId: params.toolId,
+        fileName: params.fileName,
+        fileSize: params.fileSize,
+      }),
+    });
+
+    if (!confirmRes.ok) {
+      const errData = await confirmRes.json().catch(() => ({}));
+      console.error("[History:Client] ❌ Confirm failed:", confirmRes.status, errData);
+      // File is in R2 but history not updated — not ideal but not critical
     } else {
-      bytes = params.fileData;
+      console.log("[History:Client] ✅ History confirmed with r2Key:", r2Key);
     }
 
-    const totalChunks = Math.ceil(bytes.length / CHUNK_SIZE);
-    const sessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-    console.log(`[History:Client] 📦 ${totalChunks} chunk(s)`);
-
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, bytes.length);
-      const chunkBytes = bytes.slice(start, end);
-      const chunkBase64 = uint8ToBase64(chunkBytes);
-
-      console.log(`[History:Client] 📤 Chunk ${i + 1}/${totalChunks} (${chunkBytes.length}B)`);
-
-      const res = await fetch("/api/storage/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({
-          sessionId,
-          chunkIndex: i,
-          totalChunks,
-          chunk: chunkBase64,
-          fileName: params.fileName,
-          toolId: params.toolId,
-          toolName: params.toolName,
-          resultSummary: params.resultSummary,
-        }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        console.error(`[History:Client] ❌ Chunk ${i + 1}/${totalChunks} failed:`, res.status, errData);
-        return false;
-      }
-
-      const result = await res.json();
-      if (result.uploaded) {
-        console.log(`[History:Client] ✅ Upload complete! r2Key: ${result.r2Key}`);
-      }
-    }
-
-    console.log("[History:Client] ✅ All chunks sent!");
     return true;
   } catch (err) {
     console.error("[History:Client] saveHistoryWithFile() error:", err instanceof Error ? err.message : err);
@@ -333,7 +329,7 @@ export async function getStorageUsage(): Promise<StorageUsage | null> {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Get download URL for a history entry
+// Get download URL for a history entry (proxy through our API)
 // ─────────────────────────────────────────────────────────────────
 
 export function getDownloadUrl(historyId: string): string {

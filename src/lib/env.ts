@@ -58,7 +58,6 @@ export const r2 = {
   accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
   secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
   bucketName: process.env.R2_BUCKET_NAME || "pdfcrux",
-  publicDomain: process.env.R2_PUBLIC_DOMAIN || "",
   get isConfigured() {
     const ok =
       isSet(this.accountId) &&
