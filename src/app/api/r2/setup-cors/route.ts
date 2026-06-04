@@ -76,15 +76,16 @@ export async function GET(req: Request) {
     console.log("[R2:SetupCORS] Endpoint:", `https://${accountId}.r2.cloudflarestorage.com`);
 
     // Set CORS using S3 PutBucketCors API
+    // Includes POST for S3 compatibility, comprehensive ExposeHeaders
     const result = await s3Client.send(new PutBucketCorsCommand({
       Bucket: bucketName,
       CORSConfiguration: {
         CORSRules: [
           {
             AllowedOrigins: ["*"],
-            AllowedMethods: ["GET", "PUT", "DELETE", "HEAD"],
+            AllowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"],
             AllowedHeaders: ["*"],
-            ExposeHeaders: ["ETag", "x-amz-request-id", "x-amz-id-2"],
+            ExposeHeaders: ["ETag", "Content-Length", "Content-Type"],
             MaxAgeSeconds: 3600,
           },
         ],
@@ -100,9 +101,9 @@ export async function GET(req: Request) {
       corsRules: [
         {
           allowedOrigins: ["*"],
-          allowedMethods: ["GET", "PUT", "DELETE", "HEAD"],
+          allowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"],
           allowedHeaders: ["*"],
-          exposeHeaders: ["ETag"],
+          exposeHeaders: ["ETag", "Content-Length", "Content-Type"],
           maxAgeSeconds: 3600,
         },
       ],
