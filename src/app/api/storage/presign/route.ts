@@ -35,14 +35,15 @@ async function getUserFromRequest(req: Request) {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Auto-set CORS on R2 bucket using S3 PutBucketCors API.
-// Runs ONCE (first presign call). If CORS is already set, S3 returns 200.
-// This ensures presigned URL uploads work even if user forgot to set CORS.
+// Runs EVERY presign call to ensure CORS is always active.
+// This ensures presigned URL uploads work even if user forgot to set CORS
+// via Cloudflare Dashboard.
+//
+// CORS rules include POST (for S3 compatibility) and comprehensive
+// ExposeHeaders (Content-Length, Content-Type) for proper browser handling.
 // ─────────────────────────────────────────────────────────────────────────
-let corsSetupDone = false;
 
 async function ensureR2CORS() {
-  if (corsSetupDone) return;
-
   try {
     const { S3Client, PutBucketCorsCommand } = await import("@aws-sdk/client-s3");
 
@@ -61,19 +62,17 @@ async function ensureR2CORS() {
         CORSRules: [
           {
             AllowedOrigins: ["*"],
-            AllowedMethods: ["GET", "PUT", "DELETE", "HEAD"],
+            AllowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"],
             AllowedHeaders: ["*"],
-            ExposeHeaders: ["ETag"],
+            ExposeHeaders: ["ETag", "Content-Length", "Content-Type"],
             MaxAgeSeconds: 3600,
           },
         ],
       },
     }));
 
-    corsSetupDone = true;
     console.log("[Storage:Presign] ✅ CORS auto-configured on R2 bucket");
   } catch (err) {
-    // Don't block presign if CORS setup fails — chunked fallback will handle it
     console.warn("[Storage:Presign] ⚠️ CORS auto-setup failed:", err instanceof Error ? err.message : err);
   }
 }
