@@ -1,16 +1,20 @@
 /**
  * History Module — Client-side functions for history management.
  *
- * FILE UPLOAD STRATEGY (PRESIGNED URL):
- * ────────────────────────────────────────
- * 1. POST /api/storage/presign → get presigned PUT URL + r2Key
- * 2. Browser PUTs file directly to R2 via presigned URL (no CORS if bucket CORS is set)
- * 3. POST /api/storage/confirm → update history entry with r2Key
+ * FILE UPLOAD STRATEGY (SERVER PROXY):
+ * ───────────────────────────────────────
+ * POST /api/file?toolId=xxx&fileName=yyy
+ * → Body = raw file bytes (Blob/Uint8Array)
+ * → Server uploads to R2 + updates history + tracks storage
+ * → No presigned URLs, no CORS issues, no chunks.
  *
- * DOWNLOAD STRATEGY:
- * ──────────────────
- * Proxy download through /api/storage/download (auth required).
- * Server fetches from R2 → streams to client. No CORS needed for downloads.
+ * DOWNLOAD STRATEGY (SERVER PROXY):
+ * ─────────────────────────────────────
+ * GET /api/file?key=uploads/2026-06/file.pdf&fileName=output.pdf
+ *   or
+ * GET /api/file?id=<historyId>
+ * → Server fetches from R2 → streams to client
+ * → No CORS issues for downloads.
  *
  * VERCEL ENV VARS NEEDED (4 total):
  *   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
@@ -112,14 +116,12 @@ export async function saveHistory(params: {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Save history WITH file upload to R2 — PRESIGNED URL APPROACH
+// Save history WITH file upload to R2 — SERVER PROXY APPROACH
 //
-// Step 1: POST /api/storage/presign → get presigned PUT URL + r2Key
-// Step 2: Browser PUTs file directly to R2 via presigned URL
-// Step 3: POST /api/storage/confirm → update history + storageUsed
+// Single POST to /api/file with raw file bytes in the body.
+// Server handles everything: R2 upload + history update + storage tracking.
 //
-// NO chunks, NO base64 encoding, NO server upload proxy.
-// Direct browser-to-R2 upload — clean and fast.
+// No presigned URLs. No CORS issues. No chunks. One API call.
 // ─────────────────────────────────────────────────────────────────
 
 export async function saveHistoryWithFile(params: {
@@ -137,66 +139,37 @@ export async function saveHistoryWithFile(params: {
       return false;
     }
 
-    console.log("[History:Client] 🚀 Presigned URL Upload:", params.fileName, `(${params.fileSize} bytes)`);
+    console.log("[History:Client] 🚀 Proxy Upload:", params.fileName, `(${params.fileSize} bytes)`);
 
-    // ── Step 1: Get presigned PUT URL from server ──
-    const presignRes = await fetch("/api/storage/presign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({ fileName: params.fileName }),
+    // Build URL with query params for metadata
+    const queryParams = new URLSearchParams({
+      fileName: params.fileName,
+      toolId: params.toolId,
+      toolName: params.toolName || "",
+      resultSummary: params.resultSummary || "",
     });
 
-    if (!presignRes.ok) {
-      const errData = await presignRes.json().catch(() => ({}));
-      console.error("[History:Client] ❌ Presign failed:", presignRes.status, errData);
-      return false;
-    }
-
-    const { uploadUrl, r2Key } = await presignRes.json();
-    console.log("[History:Client] 📋 Presigned URL received, r2Key:", r2Key);
-
-    // ── Step 2: Upload file directly to R2 via presigned PUT URL ──
-    // IMPORTANT: Do NOT send Content-Type header to avoid CORS preflight.
-    // PUT without custom headers is a "simple request" in CORS spec.
+    // Convert to Blob for fetch body
     const fileBlob = params.fileData instanceof Blob
       ? params.fileData
       : new Blob([params.fileData]);
 
-    console.log("[History:Client] 📤 Uploading to R2 via presigned URL...");
-    const uploadRes = await fetch(uploadUrl, {
-      method: "PUT",
+    // POST raw file bytes to /api/file proxy
+    // Server uploads to R2 server-side — no CORS, no presigned URLs
+    const uploadRes = await fetch(`/api/file?${queryParams.toString()}`, {
+      method: "POST",
+      headers,
       body: fileBlob,
-      // NO Content-Type header — prevents CORS preflight
-      // NO Authorization header — signature is in the URL
     });
 
     if (!uploadRes.ok) {
-      console.error("[History:Client] ❌ R2 upload failed:", uploadRes.status, uploadRes.statusText);
+      const errData = await uploadRes.json().catch(() => ({}));
+      console.error("[History:Client] ❌ Proxy upload failed:", uploadRes.status, errData);
       return false;
     }
 
-    console.log("[History:Client] ✅ File uploaded to R2!");
-
-    // ── Step 3: Confirm upload — update history + storageUsed ──
-    const confirmRes = await fetch("/api/storage/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({
-        r2Key,
-        toolId: params.toolId,
-        fileName: params.fileName,
-        fileSize: params.fileSize,
-      }),
-    });
-
-    if (!confirmRes.ok) {
-      const errData = await confirmRes.json().catch(() => ({}));
-      console.error("[History:Client] ❌ Confirm failed:", confirmRes.status, errData);
-      // File is in R2 but history not updated — not ideal but not critical
-    } else {
-      console.log("[History:Client] ✅ History confirmed with r2Key:", r2Key);
-    }
-
+    const result = await uploadRes.json();
+    console.log("[History:Client] ✅ Proxy upload complete! r2Key:", result.r2Key);
     return true;
   } catch (err) {
     console.error("[History:Client] saveHistoryWithFile() error:", err instanceof Error ? err.message : err);
@@ -329,9 +302,18 @@ export async function getStorageUsage(): Promise<StorageUsage | null> {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Get download URL for a history entry (proxy through our API)
+// Get download URL for a file (server proxy — no CORS)
+//
+// Two modes:
+//   By r2Key:    /api/file?key=uploads/.../file.pdf&fileName=output.pdf
+//   By historyId: /api/file?id=<historyId>
 // ─────────────────────────────────────────────────────────────────
 
+export function getDownloadUrlByKey(r2Key: string, fileName: string): string {
+  const params = new URLSearchParams({ key: r2Key, fileName });
+  return `/api/file?${params.toString()}`;
+}
+
 export function getDownloadUrl(historyId: string): string {
-  return `/api/storage/download?id=${encodeURIComponent(historyId)}`;
+  return `/api/file?id=${encodeURIComponent(historyId)}`;
 }
