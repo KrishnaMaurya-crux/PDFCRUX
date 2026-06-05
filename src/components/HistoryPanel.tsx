@@ -272,8 +272,8 @@ export default function HistoryPanel() {
 
   const handleDownload = async (entry: HistoryEntry) => {
     try {
-      // Always use proxy download through /api/storage/download
-      // This avoids CORS issues — server fetches from R2 and streams to client
+      // Proxy download through /api/file?id=xxx
+      // Server fetches from R2 and streams to client — no CORS issues
       const { data: { session } } = await supabase.auth.getSession();
       const headers: Record<string, string> = session?.access_token
         ? { Authorization: `Bearer ${session.access_token}` }
